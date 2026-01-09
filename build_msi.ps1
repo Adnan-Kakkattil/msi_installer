@@ -34,8 +34,15 @@ Write-Host "Build successful!" -ForegroundColor Green
 
 # Copy installer.ps1 to target directory for inclusion in MSI
 Write-Host "`nPreparing files..." -ForegroundColor Cyan
-$installerPs1 = "..\installer.ps1"
-if (Test-Path $installerPs1) {
+# Check current directory first, then parent directory
+$installerPs1 = $null
+if (Test-Path "installer.ps1") {
+    $installerPs1 = "installer.ps1"
+} elseif (Test-Path "..\installer.ps1") {
+    $installerPs1 = "..\installer.ps1"
+}
+
+if ($installerPs1) {
     $targetDir = "target\release"
     if (-not (Test-Path $targetDir)) {
         New-Item -ItemType Directory -Path $targetDir -Force | Out-Null
@@ -43,7 +50,8 @@ if (Test-Path $installerPs1) {
     Copy-Item $installerPs1 "$targetDir\installer.ps1" -Force
     Write-Host "Copied installer.ps1 to target directory" -ForegroundColor Green
 } else {
-    Write-Host "WARNING: installer.ps1 not found at $installerPs1" -ForegroundColor Yellow
+    Write-Host "WARNING: installer.ps1 not found in current or parent directory" -ForegroundColor Yellow
+    Write-Host "Make sure installer.ps1 exists before building the MSI" -ForegroundColor Yellow
 }
 
 # Build MSI using cargo-wix
