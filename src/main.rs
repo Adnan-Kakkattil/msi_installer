@@ -20,7 +20,44 @@ fn show_error(message: &str) {
     }
 }
 
-// Removed show_info function - no popup on success
+fn get_last_error_from_log() -> Option<String> {
+    let program_data = env::var("ProgramData").ok()?;
+    let log_dir = PathBuf::from(program_data).join("EbantisV4").join("Logs");
+    
+    if !log_dir.exists() {
+        return None;
+    }
+
+    // Find the most recent log file
+    let entries = std::fs::read_dir(log_dir).ok()?;
+    let mut log_files: Vec<_> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_file())
+        .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("log"))
+        .collect();
+
+    if log_files.is_empty() {
+        return None;
+    }
+
+    log_files.sort_by_key(|e| e.metadata().and_then(|m| m.modified()).ok());
+    
+    let last_log = log_files.last()?;
+    let content = std::fs::read_to_string(last_log.path()).ok()?;
+    
+    // Find the last line containing "| ERROR |"
+    content.lines()
+        .rev()
+        .find(|line| line.contains("| ERROR |"))
+        .map(|line| {
+            // Strip the timestamp and level if possible
+            if let Some(pos) = line.find("| ERROR |") {
+                line[pos + "| ERROR |".len()..].trim().to_string()
+            } else {
+                line.to_string()
+            }
+        })
+}
 
 fn extract_branch_id_from_msi_name() -> Option<String> {
     // Try multiple methods to get the MSI file path:
@@ -41,26 +78,51 @@ fn extract_branch_id_from_msi_name() -> Option<String> {
             if let Some(name_str) = file_name.to_str() {
                 // Extract branch_id from format: installer_{branch_id}.msi or EbantisTrack_{branch_id}.msi
                 // Branch ID can be any format (including UUIDs with hyphens)
-                if name_str.ends_with(".msi") {
-                    // Try installer_ prefix first
-                    if let Some(start) = name_str.find("installer_") {
-                        let after_prefix = &name_str[start + "installer_".len()..];
-                        if let Some(end) = after_prefix.find(".msi") {
-                            let branch_id = &after_prefix[..end];
-                            if !branch_id.is_empty() {
-                                return Some(branch_id.to_string());
+                
+                // Find where the extension starts (handle cases like .msi or .exe)
+                let end_pos = name_str.rfind('.').unwrap_or(name_str.len());
+                let base_name = &name_str[..end_pos];
+
+                let mut extracted_id = None;
+
+                // Try installer_ prefix first
+                if let Some(start) = base_name.find("installer_") {
+                    extracted_id = Some(base_name[start + "installer_".len()..].to_string());
+                }
+                // Fallback to EbantisTrack_ prefix
+                else if let Some(start) = base_name.find("EbantisTrack_") {
+                    extracted_id = Some(base_name[start + "EbantisTrack_".len()..].to_string());
+                }
+
+                if let Some(mut id) = extracted_id {
+                    // Handle Windows copy suffixes like " (1)", " (2)", etc.
+                    if let Some(pos) = id.rfind(" (") {
+                        let suffix = &id[pos..];
+                        // Check if suffix matches " (\d+)"
+                        if suffix.starts_with(" (") && suffix.ends_with(')') {
+                            let inner = &suffix[2..suffix.len()-1];
+                            if !inner.is_empty() && inner.chars().all(|c| c.is_ascii_digit()) {
+                                id = id[..pos].to_string();
                             }
                         }
                     }
-                    // Fallback to EbantisTrack_ prefix for backward compatibility
-                    else if let Some(start) = name_str.find("EbantisTrack_") {
-                        let after_prefix = &name_str[start + "EbantisTrack_".len()..];
-                        if let Some(end) = after_prefix.find(".msi") {
-                            let branch_id = &after_prefix[..end];
-                            if !branch_id.is_empty() {
-                                return Some(branch_id.to_string());
+                    
+                    // Also handle "_" suffixes if they exist (sometimes browsers do this)
+                    if let Some(pos) = id.rfind('_') {
+                        let suffix = &id[pos+1..];
+                        if !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) {
+                            // Only strip if it's likely a copy suffix (e.g. EbantisTrack_abc_1)
+                            // This is a bit riskier as branch IDs might have underscores, 
+                            // but usually they are UUIDs or alphanumeric.
+                            // We only strip if the part before is not empty.
+                            if pos > 0 {
+                                id = id[..pos].to_string();
                             }
                         }
+                    }
+
+                    if !id.is_empty() {
+                        return Some(id);
                     }
                 }
             }
@@ -142,16 +204,21 @@ fn main() {
                 // Silent success - no popup
                 std::process::exit(0);
             } else {
-                // Only show error popup on failure
-                show_error(&format!(
-                    "Installation failed with exit code: {}",
-                    status.code().unwrap_or(-1)
-                ));
+                // Try to get a more specific error from the log file
+                let mut error_msg = format!("Installation failed with exit code: {}", status.code().unwrap_or(-1));
+                
+                if let Some(specific_error) = get_last_error_from_log() {
+                    error_msg = format!("{}\n\nReason: {}", error_msg, specific_error);
+                }
+                
+                error_msg = format!("{}\n\nPlease check the log files in C:\\ProgramData\\EbantisV4\\Logs for more details.", error_msg);
+                
+                show_error(&error_msg);
                 std::process::exit(1);
             }
         }
         Err(e) => {
-            show_error(&format!("Failed to execute installer: {}", e));
+            show_error(&format!("Failed to execute installer: {}\n\nPlease ensure PowerShell is available and you have administrative privileges.", e));
             std::process::exit(1);
         }
     }

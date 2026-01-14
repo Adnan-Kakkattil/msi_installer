@@ -385,13 +385,30 @@ function Get-BranchIdFromExecutable {
         }
         
         # Try to extract from executable filename
-        $exeName = Split-Path -Leaf $PSCommandPath
-        Write-Log "Executable name: $exeName" "INFO"
+        $exePath = $PSCommandPath
+        if (-not $exePath) {
+            $exePath = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
+        }
+        $exeName = Split-Path -Leaf $exePath
+        Write-Log "Current filename: $exeName" "INFO"
         
-        # Try to extract branch_id from format: EbantisTrack_{branch_id}.exe or .msi
-        if ($exeName -match "EbantisTrack_(.+)\.(exe|msi)") {
+        # Try to extract branch_id from format: EbantisTrack_{branch_id}.exe or .msi or installer_{branch_id}.msi
+        $branchId = $null
+        if ($exeName -match "(?:EbantisTrack_|installer_)(.+)\.(?:exe|msi)") {
             $branchId = $matches[1]
-            Write-Log "Extracted branch_id from filename: $branchId" "INFO"
+            
+            # Handle Windows copy suffixes like " (1)", " (2)", etc.
+            if ($branchId -match "(.+) \(\d+\)$") {
+                $branchId = $matches[1]
+                Write-Log "Stripped Windows copy suffix from branch_id: $branchId" "INFO"
+            }
+            # Handle "_" suffixes (e.g. EbantisTrack_abc_1)
+            elseif ($branchId -match "(.+)_\d+$") {
+                $branchId = $matches[1]
+                Write-Log "Stripped underscore copy suffix from branch_id: $branchId" "INFO"
+            }
+            
+            Write-Log "Extracted branch_id: $branchId" "INFO"
             return $branchId
         }
         
@@ -680,7 +697,7 @@ function Update-InstalledDeviceCount {
         # Python: api_url = f"https://ebantisv4service.thekosmoz.com/api/v1/app-versions/tenants/{branch_id_str}/installed-count"
         # Python line 1273: update_installed_device_count(tenant_id) - passes tenant_id
         # The function parameter is named "branch_id" but receives tenant_id, and uses it in /tenants/ endpoint
-        $apiUrl = "https://qaebantisv4service.thekosmoz.com/api/v1/app-versions/tenants/$TenantId/installed-count"
+        $apiUrl = "https://ebantisv4service.thekosmoz.com/api/v1/app-versions/tenants/$TenantId/installed-count"
         $headers = @{
             "Authorization" = "Bearer $authToken"
             "Content-Type" = "application/json"
@@ -858,10 +875,11 @@ function Download-AppPackage {
             New-Item -ItemType Directory -Path $ExtractPath -Force | Out-Null
         }
         
-        $ApiUrl = "https://qaebantisapiv4.thekosmoz.com/DownloadLatestversion?branch_id=$BranchId"
+        $ApiUrl = "https://ebantisapiv4.thekosmoz.com/DownloadLatestversion?branch_id=$BranchId"
         $Headers = @{
+            "Content-Type"   = "application/json"
             "IsInternalCall" = "true"
-            "ClientId" = "EbantisTrack"
+            "ClientId"       = "EbantisTrack"
         }
         
         Write-Log "Starting main package download from API: $ApiUrl" "INFO"
@@ -1520,8 +1538,7 @@ try {
     $isAllowed, $message = Test-InstallationAllowed -BranchId $BranchId
     if (-not $isAllowed) {
         Write-Log $message "ERROR"
-        Write-Host $message -ForegroundColor Red
-        Read-Host "Press Enter to exit..."
+        # Removed Read-Host to prevent hanging in MSI/silent mode
         Exit 1
     }
     
