@@ -659,14 +659,15 @@ function Update-InstallationData {
 
 function Update-InstalledDeviceCount {
     param(
-        [string]$BranchId,
         [string]$TenantId
     )
     
     # Matches Python: update_installed_device_count()
-    # Note: Python function takes branch_id but is called with tenant_id (line 1273)
-    # The API URL uses branch_id, but payload uses tenantUniqueId with tenant_id value
-    # However, the API might expect branchUniqueId instead of tenantUniqueId
+    # IMPORTANT: Python function parameter is named "branch_id" but is called with tenant_id (line 1273)
+    # The function uses the passed value (which is actually tenant_id) in:
+    #   - URL path: /tenants/{value}/installed-count (uses tenant_id in /tenants/ endpoint)
+    #   - Payload as tenantUniqueId: {"tenantUniqueId": value, "installedDeviceCount": 1}
+    # This matches the Python implementation exactly
     try {
         $authToken = Get-AuthToken
         if (-not $authToken) {
@@ -675,53 +676,45 @@ function Update-InstalledDeviceCount {
             return $false, $msg
         }
         
-        # Try the original endpoint first
-        $apiUrl = "https://ebantisv4service.thekosmoz.com/api/v1/app-versions/branches/$BranchId/installed-count"
+        # Match Python: Uses ebantisv4service and /tenants/ endpoint (not /branches/)
+        # Python: api_url = f"https://ebantisv4service.thekosmoz.com/api/v1/app-versions/tenants/{branch_id_str}/installed-count"
+        # Python line 1273: update_installed_device_count(tenant_id) - passes tenant_id
+        # The function parameter is named "branch_id" but receives tenant_id, and uses it in /tenants/ endpoint
+        $apiUrl = "https://qaebantisv4service.thekosmoz.com/api/v1/app-versions/tenants/$TenantId/installed-count"
         $headers = @{
             "Authorization" = "Bearer $authToken"
             "Content-Type" = "application/json"
         }
         
-        # Try with branchUniqueId first (as per API structure)
+        # Match Python line 567: payload uses tenantUniqueId with the value passed (tenant_id)
         $payload = @{
-            branchUniqueId = $BranchId
+            tenantUniqueId = $TenantId
             installedDeviceCount = 1
         } | ConvertTo-Json
         
-        Write-Log "Updating installed device count for branch_id: $BranchId" "INFO"
+        Write-Log "Updating installed device count for tenant_id: $TenantId" "INFO"
+        Write-Log "API URL: $apiUrl" "INFO"
         Write-Log "Payload: $payload" "INFO"
         
         try {
             $response = Invoke-RestMethod -Uri $apiUrl -Method Put -Body $payload -ContentType "application/json" -Headers $headers -TimeoutSec 30
-            $msg = "Installed device count updated successfully for branch_id: $BranchId"
+            $msg = "Installed device count updated successfully for tenant_id: $TenantId"
             Write-Log $msg "INFO"
             return $true, $msg
         } catch {
-            # If 404, try alternative endpoint or payload structure
+            # If 404, the endpoint might not exist - log but don't fail installation
             if ($_.Exception.Response.StatusCode.value__ -eq 404) {
-                Write-Log "Primary endpoint returned 404, trying alternative payload structure..." "WARNING"
-                # Try with tenantUniqueId (original payload)
-                $payloadAlt = @{
-                    tenantUniqueId = $TenantId
-                    installedDeviceCount = 1
-                } | ConvertTo-Json
-                
-                try {
-                    $response = Invoke-RestMethod -Uri $apiUrl -Method Put -Body $payloadAlt -ContentType "application/json" -Headers $headers -TimeoutSec 30
-                    $msg = "Installed device count updated successfully for branch_id: $BranchId (using alternative payload)"
-                    Write-Log $msg "INFO"
-                    return $true, $msg
-                } catch {
-                    $msg = "API endpoint not found (404). Device count update may not be supported by this API version."
-                    Write-Log $msg "WARNING"
-                    return $false, $msg
-                }
+                $msg = "API endpoint not found (404). Device count update may not be supported by this API version. Installation will continue."
+                Write-Log $msg "WARNING"
+                return $false, $msg
             } else {
-                throw
+                $msg = "API request error while updating device count for tenant_id $TenantId : $_"
+                Write-Log $msg "ERROR"
+                return $false, $msg
             }
         }
     } catch {
-        $msg = "API request error while updating device count for branch_id $BranchId : $_"
+        $msg = "Error updating installed device count for tenant_id $TenantId : $_"
         Write-Log $msg "ERROR"
         return $false, $msg
     }
@@ -865,7 +858,7 @@ function Download-AppPackage {
             New-Item -ItemType Directory -Path $ExtractPath -Force | Out-Null
         }
         
-        $ApiUrl = "https://ebantisapiv4.thekosmoz.com/DownloadLatestversion?branch_id=$BranchId"
+        $ApiUrl = "https://qaebantisapiv4.thekosmoz.com/DownloadLatestversion?branch_id=$BranchId"
         $Headers = @{
             "IsInternalCall" = "true"
             "ClientId" = "EbantisTrack"
@@ -1707,7 +1700,8 @@ try {
         Update-InstallationData -TenantId $TenantId -BranchId $BranchId -StatusFlag $true -InstallationFlag $true -Status "installed"
         
         # Update installed device count
-        $countModifyFlag, $countMessage = Update-InstalledDeviceCount -BranchId $BranchId -TenantId $TenantId
+        # Match Python line 1273: update_installed_device_count(tenant_id) - passes tenant_id, not branch_id
+        $countModifyFlag, $countMessage = Update-InstalledDeviceCount -TenantId $TenantId
         Write-Log "Installed device count update: $countModifyFlag, message: $countMessage" "INFO"
     } else {
         Write-Log "Installation completed but autostart configuration failed." "WARNING"
