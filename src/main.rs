@@ -4,6 +4,13 @@
 use std::env;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+<<<<<<< HEAD
+=======
+use wait_timeout::ChildExt;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+#[cfg(windows)]
+>>>>>>> 7b633b5c1ab0b08f21cc91b98148f2bcc4e1393d
 use winapi::um::winbase::CREATE_NO_WINDOW;
 use winapi::um::winuser::{MessageBoxW, MB_OK, MB_ICONERROR};
 
@@ -88,6 +95,105 @@ fn get_installer_script_path() -> PathBuf {
     PathBuf::from("installer.ps1")
 }
 
+<<<<<<< HEAD
+=======
+fn cleanup_old_installations() {
+    log("Checking for existing product registrations to scrub...");
+    
+    // Multi-stage scrubbing logic
+    let registry_nuke = r#"
+        # 1. Kill any running Ebantis processes first
+        $procs = Get-Process | Where-Object { $_.Name -like '*Ebantis*' -or $_.Name -like '*AutoUpdation*' }
+        if ($procs) {
+            Write-Host "Stopping $($procs.Count) processes..."
+            $procs | Stop-Process -Force -ErrorAction SilentlyContinue
+        }
+
+        # 2. Try standard uninstallation by name
+        Get-Package -Name '*Ebantis*' -ErrorAction SilentlyContinue | Uninstall-Package -Force -ErrorAction SilentlyContinue
+
+        # 3. Search Registry for ANY ProductCode related to Ebantis
+        $paths = @(
+            "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+            "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+            "HKLM:\SOFTWARE\Classes\Installer\Products"
+        )
+        
+        foreach ($path in $paths) {
+            if (Test-Path $path) {
+                Get-ChildItem -Path $path -ErrorAction SilentlyContinue | ForEach-Object {
+                    $name = $_.GetValue("ProductName")
+                    if (-not $name) { $name = $_.GetValue("DisplayName") }
+                    
+                    if ($name -and $name -like "*Ebantis*") {
+                        $code = $_.PSChildName
+                        Write-Output "Force scrubbing Product ID: $code ($name)"
+                        
+                        # If it's a GUID format (from Uninstall), use msiexec to clean internal DB
+                        if ($code -match '^\{.*\}$') {
+                            Start-Process msiexec.exe -ArgumentList "/x $code /qn /norestart" -Wait -ErrorAction SilentlyContinue
+                        }
+                        
+                        # Nuke the registry key directly to clear the 'already installed' block
+                        Remove-Item -Path $_.PSPath -Recurse -Force -ErrorAction SilentlyContinue
+                    }
+                }
+            }
+        }
+
+        # 4. Cleanup the installation folders
+        $progFiles = "${env:ProgramFiles}\EbantisV4"
+        if (Test-Path $progFiles) {
+            # Try to rename first if locked, then schedule for delete
+            Remove-Item -Path $progFiles -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    "#;
+
+    let mut cmd = Command::new("powershell.exe");
+    cmd.args(&["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", registry_nuke]);
+    #[cfg(windows)]
+    {
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    
+    match cmd.spawn() {
+        Ok(mut child) => {
+            // Wait up to 30 seconds for cleanup to finish
+            let timeout = std::time::Duration::from_secs(30);
+            match child.wait_timeout(timeout) {
+                Ok(Some(status)) => log(&format!("Force cleanup routine finished with status: {:?}", status)),
+                Ok(None) => {
+                    log("Cleanup routine timed out after 30s. Killing process and continuing...");
+                    let _ = child.kill();
+                }
+                Err(e) => log(&format!("Error waiting for cleanup: {}", e)),
+            }
+        }
+        Err(e) => log(&format!("Failed to spawn cleanup process: {}", e)),
+    }
+}
+
+fn launch_msi_with_logging() {
+    let msi_name = "EbantisV4_Setup.msi";
+    let log_path = "C:\\Ebantis_Setup_Log.txt";
+    
+    log(&format!("Bootstrapper: Starting MSI with forced logging into {}", log_path));
+    
+    // Command: msiexec /i "EbantisV4_Setup.msi" /L*v "C:\Ebantis_Setup_Log.txt" /qn
+    let mut cmd = Command::new("msiexec.exe");
+    cmd.args(&[
+        "/i", msi_name,
+        "/L*v", log_path,
+        "/qn" // Added /qn for quiet install, remove if you want the UI
+    ]);
+    
+    match cmd.spawn() {
+        Ok(_) => log("Bootstrapper: MSI process launched successfully."),
+        Err(e) => log(&format!("Bootstrapper: Failed to launch MSI: {}", e)),
+    }
+}
+
+>>>>>>> 7b633b5c1ab0b08f21cc91b98148f2bcc4e1393d
 fn main() {
     // Extract branch ID from MSI filename
     let branch_id = match extract_branch_id_from_msi_name() {

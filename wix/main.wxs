@@ -1,5 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+    <?ifndef UpgradeCode?>
+        <?define UpgradeCode = "36851736-5317-4697-b7ab-835c2037698f" ?>
+    <?endif?>
     <Product Id="*" 
              Name="Ebantis V4 Installer" 
              Language="1033" 
@@ -24,14 +27,14 @@
         <Directory Id="TARGETDIR" Name="SourceDir">
             <Directory Id="ProgramFiles64Folder">
                 <Directory Id="INSTALLFOLDER" Name="EbantisV4">
-                    <Component Id="InstallerExe" Guid="A1A1A1A1-A1A1-A1A1-A1A1-A1A1A1A1A1A1" Win64="yes">
+                    <Component Id="InstallerExe" Guid="*" Win64="yes">
                         <File Id="InstallerExeFile" 
                               Source="target\release\ebantis-msi-installer.exe" 
                               KeyPath="yes"/>
                     </Component>
                     
                     <!-- PowerShell installer script -->
-                    <Component Id="InstallerScript" Guid="B2B2B2B2-B2B2-B2B2-B2B2-B2B2B2B2B2B2" Win64="yes">
+                    <Component Id="InstallerScript" Guid="*" Win64="yes">
                         <File Id="InstallerScriptFile" 
                               Source="installer.ps1" 
                               KeyPath="yes"/>
