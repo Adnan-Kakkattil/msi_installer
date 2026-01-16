@@ -284,7 +284,66 @@ fn execute_installer() -> i32 {
     }
 }
 
+fn write_msi_debug_log(message: &str) {
+    // Write debug information to a log file for troubleshooting
+    if let Ok(program_data) = env::var("ProgramData") {
+        let log_dir = PathBuf::from(&program_data).join("EbantisV4").join("Logs");
+        if !log_dir.exists() {
+            let _ = std::fs::create_dir_all(&log_dir);
+        }
+        
+        let log_file = log_dir.join("msi_debug.log");
+        
+        // Get current time (simplified without external dependencies)
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let timestamp = format!("{}", now);
+        
+        let log_entry = format!("{} | DEBUG | {}\n", timestamp, message);
+        
+        use std::io::Write;
+        if let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_file) {
+            let _ = file.write_all(log_entry.as_bytes());
+        }
+    }
+}
+
+fn log_msi_environment() {
+    // Log all relevant MSI environment variables for debugging
+    let mut log_lines = vec!["=== MSI Environment Variables ===".to_string()];
+    
+    // Check common MSI properties
+    let msi_vars = vec![
+        "ACTION", "REMOVE", "REINSTALL", "REINSTALLMODE", 
+        "OriginalDatabase", "INSTALLFOLDER", "ProductCode",
+        "MSI_FILENAME", "EBANTIS_BRANCH_ID"
+    ];
+    
+    for var in msi_vars {
+        if let Ok(value) = env::var(var) {
+            log_lines.push(format!("{} = {}", var, value));
+        } else {
+            log_lines.push(format!("{} = (not set)", var));
+        }
+    }
+    
+    // Log command-line arguments
+    let args: Vec<String> = env::args().collect();
+    log_lines.push(format!("Command-line args: {:?}", args));
+    
+    let log_message = log_lines.join("\n");
+    write_msi_debug_log(&log_message);
+}
+
 fn main() {
+    // Log MSI environment for debugging
+    log_msi_environment();
+    
     // Check command-line arguments for uninstall flag
     let args: Vec<String> = env::args().collect();
     let is_uninstall = args.iter().any(|arg| {
@@ -303,10 +362,13 @@ fn main() {
         .unwrap_or(false);
     
     let exit_code = if is_uninstall || is_uninstall_env {
+        write_msi_debug_log("Executing uninstaller path");
         execute_uninstaller()
     } else {
+        write_msi_debug_log("Executing installer path");
         execute_installer()
     };
     
+    write_msi_debug_log(&format!("Exiting with code: {}", exit_code));
     std::process::exit(exit_code);
 }

@@ -82,14 +82,16 @@
                       Return="check"/>
         
         <InstallExecuteSequence>
-            <!-- Set MSI filename for both fresh installs and upgrades -->
-            <!-- NOT REMOVE means: run if we're installing/upgrading, not uninstalling -->
-            <Custom Action="SetMsiFilename" After="InstallInitialize">NOT REMOVE</Custom>
+            <!-- Set MSI filename for both fresh installs, upgrades, and repairs -->
+            <!-- Run in all scenarios except uninstall -->
+            <!-- Check if REMOVE property is not set to "ALL" (uninstall scenario) -->
+            <!-- Use OR with empty check to handle when REMOVE is not set at all -->
+            <Custom Action="SetMsiFilename" After="InstallInitialize">(REMOVE="" OR REMOVE&lt;&gt;"ALL")</Custom>
             
             <!-- Run installer after files are installed -->
-            <!-- Condition: NOT REMOVE ensures it runs on install/upgrade/repair but not uninstall -->
-            <!-- REINSTALLMODE checks if any reinstall flags are set (repair scenarios) -->
-            <Custom Action="RunInstaller" After="InstallFiles">NOT REMOVE</Custom>
+            <!-- Condition: Run on install, upgrade, repair, but NOT on uninstall -->
+            <!-- Check if REMOVE is empty or not equal to "ALL" to cover all install scenarios -->
+            <Custom Action="RunInstaller" After="InstallFiles">(REMOVE="" OR REMOVE&lt;&gt;"ALL")</Custom>
             
             <!-- Run uninstaller before files are removed during uninstallation -->
             <!-- This runs before RemoveFiles action -->

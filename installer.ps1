@@ -83,6 +83,21 @@ function Write-Log {
 Write-Log "Starting Ebantis V4 Installer..." "INFO"
 Write-Log "Running with administrative privileges." "INFO"
 
+# Log MSI environment variables for debugging
+Write-Log "=== MSI Environment Variables ===" "INFO"
+$msiVars = @("ACTION", "REMOVE", "REINSTALL", "REINSTALLMODE", "OriginalDatabase", "INSTALLFOLDER", "ProductCode", "MSI_FILENAME", "EBANTIS_BRANCH_ID")
+foreach ($var in $msiVars) {
+    $value = [System.Environment]::GetEnvironmentVariable($var)
+    if ($value) {
+        Write-Log "  $var = $value" "INFO"
+    } else {
+        Write-Log "  $var = (not set)" "INFO"
+    }
+}
+Write-Log "Command-line arguments: $($MyInvocation.Line)" "INFO"
+Write-Log "Script path: $PSCommandPath" "INFO"
+Write-Log "=== End MSI Environment Variables ===" "INFO"
+
 # -------------------------------------------------------------------------
 # STEP 2: SYSTEM INFORMATION GATHERING
 # -------------------------------------------------------------------------

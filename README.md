@@ -100,7 +100,14 @@ Windows Installer detects that the Product Code is already registered on the sys
 
 4. **The installer now runs on upgrades:**
    - The WiX configuration has been updated to run the installer script during upgrades, repairs, and fresh installs
-   - The condition `NOT REMOVE` ensures it runs on any installation scenario except uninstall
+   - The condition `(REMOVE="" OR REMOVE<>"ALL")` ensures it runs on any installation scenario except uninstall
+   - This fix resolves the "condition is false" error in maintenance mode
+
+5. **Use the cleanup script for complete reinstallation:**
+   ```powershell
+   .\cleanup_and_install.ps1 -MsiPath "installer_{branch_id}.msi"
+   ```
+   This script completely removes the product (files, registry, cache) and reinstalls fresh.
 
 ### Issue: Custom actions not running
 
@@ -111,6 +118,8 @@ Windows Installer detects that the Product Code is already registered on the sys
 **Solutions:**
 - Ensure you're not in uninstall mode (`REMOVE="ALL"` means uninstall)
 - Check that files are actually being installed (`InstallFiles` action should run before `RunInstaller`)
+- Check debug logs: `C:\ProgramData\EbantisV4\Logs\msi_debug.log` for environment variable values
+- Use the cleanup script: `.\cleanup_and_install.ps1 -MsiPath "installer_{branch_id}.msi"` for a fresh install
 
 ### Testing Installation
 
