@@ -1,23 +1,29 @@
-<#
-.SYNOPSIS
-    Ebantis V4 Installer - PowerShell Version
-    Complete installation flow converted from Python/Cython implementation
+param(
+    [string]$branch_id
+)
 
-.DESCRIPTION
-    Handles the complete installation of the Ebantis Agent, including:
-    - Prerequisite checks (Admin, Internet)
-    - Tenant Information Initialization
-    - Installation Validation
-    - Application Package Download & Extraction
-    - Folder Permission Updates
-    - Autostart Configuration
-    - Status Updates to API
+# Logging Function (Must be defined before use)
+$LogFile = [System.IO.Path]::Combine($env:TEMP, "Ebantis_Setup_Log.txt")
+function Write-Log {
+    param(
+        [Parameter(Mandatory=$true)] [string]$Message,
+        [ValidateSet("INFO", "WARNING", "ERROR")] [string]$Level = "INFO"
+    )
+    $Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $LogEntry = "$Timestamp | $Level | $Message"
+    $Color = "Cyan"
+    if ($Level -eq "ERROR") { $Color = "Red" }
+    elseif ($Level -eq "WARNING") { $Color = "Yellow" }
+   
+    Write-Host $LogEntry -ForegroundColor $Color
+    try {
+        Add-Content -Path $LogFile -Value $LogEntry -Encoding UTF8 -ErrorAction SilentlyContinue
+    } catch {}
+}
 
-.NOTES
-    Version: 4.0
-    Based on: installation.pyx flow
-    Excludes: Uninstaller, Wazuh installation
-#>
+# Preserve branch_id across potential elevation
+if ($branch_id) { $env:EBANTIS_BRANCH_ID = $branch_id }
+if ($env:EBANTIS_BRANCH_ID -and -not $branch_id) { $branch_id = $env:EBANTIS_BRANCH_ID }
 
 # -------------------------------------------------------------------------
 # STEP 1: ADMIN PRIVILEGE CHECK & INITIALIZATION
@@ -37,12 +43,69 @@ if (-not (Test-IsAdmin)) {
     Exit
 }
 
+# -------------------------------------------------------------------------
+# STEP 1.5: FORCE CLEANING (Scrubbing any existing Product IDs)
+# -------------------------------------------------------------------------
+Write-Log "Initializing deep clean of previous installations..." "INFO"
+
+# 1. Terminate all Ebantis related processes
+Get-Process | Where-Object { $_.Name -like "*Ebantis*" -or $_.Name -like "*AutoUpdation*" } | Stop-Process -Force -ErrorAction SilentlyContinue
+
+# 2. Scrub Registry for Ebantis Product Codes
+$registryPaths = @(
+    "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+    "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+    "HKLM:\SOFTWARE\Classes\Installer\Products"
+)
+
+foreach ($regPath in $registryPaths) {
+    if (Test-Path $regPath) {
+        $keys = Get-ChildItem -Path $regPath
+        foreach ($key in $keys) {
+            $name = $key.GetValue("ProductName")
+            if (-not $name) { $displayName = $key.GetValue("DisplayName") } else { $displayName = $name }
+            
+            if ($displayName -like "*Ebantis*") {
+                $productCode = $key.PSChildName
+                Write-Log "Found existing product: $displayName ($productCode). Forcefully removing..." "WARNING"
+                
+                # If it's a GUID format (from Uninstall), use msiexec to clean internal DB
+                if ($productCode -match '^\{.*\}$') {
+                    Start-Process msiexec.exe -ArgumentList "/x $productCode /qn /norestart" -Wait
+                }
+                
+                # Nuke remaining registry keys directly to clear the 'already installed' block
+                Remove-Item -Path $key.PSPath -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+    }
+}
+
+# 3. Force remove the installation folder
+$installDir = "${env:ProgramFiles}\EbantisV4"
+if (Test-Path $installDir) {
+    Write-Log "Removing leftover files in $installDir" "INFO"
+    # Files might be locked, so we try multiple times
+    for ($i=1; $i -le 3; $i++) {
+        try {
+            Remove-Item -Path $installDir -Recurse -Force -ErrorAction Stop
+            break
+        } catch {
+            Write-Log "Folder removal attempt $i failed. Retrying..." "WARNING"
+            Start-Sleep -Seconds 1
+        }
+    }
+}
+
+Write-Log "Force cleaning complete." "INFO"
+
 # Configuration Constants
 $AppName = "EbantisV4"
 $ProgramFilesPath = [System.IO.Path]::Combine($env:ProgramFiles, $AppName)
 $ProgramDataPath = [System.IO.Path]::Combine($env:ProgramData, $AppName)
 $LogFolder = [System.IO.Path]::Combine($ProgramDataPath, "Logs")
-$LogFile = [System.IO.Path]::Combine($LogFolder, "Ebantis_setup_$(Get-Date -Format 'yyyy-MM-dd').log")
+
+# Log path is set at the top
 
 # Create Directories
 $DirsToCreate = @(
@@ -64,21 +127,7 @@ foreach ($Dir in $DirsToCreate) {
     }
 }
 
-# Logging Function
-function Write-Log {
-    param(
-        [Parameter(Mandatory=$true)] [string]$Message,
-        [ValidateSet("INFO", "WARNING", "ERROR")] [string]$Level = "INFO"
-    )
-    $Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    $LogEntry = "$Timestamp | $Level | $Message"
-    $Color = "Cyan"
-    if ($Level -eq "ERROR") { $Color = "Red" }
-    elseif ($Level -eq "WARNING") { $Color = "Yellow" }
-   
-    Write-Host $LogEntry -ForegroundColor $Color
-    Add-Content -Path $LogFile -Value $LogEntry -Encoding UTF8
-}
+# Write-Log function moved to the top
 
 Write-Log "Starting Ebantis V4 Installer..." "INFO"
 Write-Log "Running with administrative privileges." "INFO"
@@ -496,16 +545,16 @@ function Save-TenantInfoToJson {
 function Initialize-TenantInfo {
     # Matches Python: initialize_tenant_info()
     try {
-        # Extract branch_id from executable filename
-        $branchId = Get-BranchIdFromExecutable
+        # Prioritize branch_id from parameter/environment, then fallback to filename
+        $finalBranchId = if ($branch_id) { $branch_id } else { Get-BranchIdFromExecutable }
         
-        if (-not $branchId) {
-            Write-Log "Failed to extract branch_id from executable filename." "ERROR"
+        if (-not $finalBranchId) {
+            Write-Log "Failed to determine branch_id from parameter or filename." "ERROR"
             return $null
         }
         
         # Fetch tenant info from API using branch_id
-        $tenantInfo = Get-TenantInfoByBranchId -BranchId $branchId
+        $tenantInfo = Get-TenantInfoByBranchId -BranchId $finalBranchId
         
         if (-not $tenantInfo) {
             Write-Log "Failed to fetch tenant information from API." "ERROR"
@@ -905,22 +954,43 @@ function Download-AppPackage {
             $fileSize = 0
         }
         
-        # Download the file (single-threaded for now - multi-threaded requires complex file locking)
-        # Note: PowerShell jobs have limitations with file streams, so using single-threaded download
-        # which is still efficient for most use cases
+        # Use HttpClient for potentially faster single-thread download 
+        # (Invoke-WebRequest is notoriously slow in PS 5.1)
         try {
-            Write-Log "Downloading package (streaming download)..." "INFO"
-            Invoke-WebRequest -Uri $ApiUrl -Method Post -Headers $Headers -OutFile $DownloadPath -TimeoutSec 600
+            Write-Log "Downloading package using HttpClient (high performance)..." "INFO"
             
-            if (-not (Test-Path $DownloadPath) -or (Get-Item $DownloadPath).Length -eq 0) {
-                Write-Log "Download failed: File not found or empty." "ERROR"
-                return $false
+            $client = New-Object System.Net.Http.HttpClient
+            $client.Timeout = [System.TimeSpan]::FromMinutes(10)
+            
+            $jsonPayload = @{
+                branch_id = $BranchId
+            } | ConvertTo-Json
+            
+            $content = New-Object System.Net.Http.StringContent($jsonPayload, [System.Text.Encoding]::UTF8, "application/json")
+            
+            # Add internal headers
+            foreach ($key in $Headers.Keys) {
+                if ($key -ne "Content-Type") {
+                    $client.DefaultRequestHeaders.Add($key, $Headers[$key])
+                }
             }
             
-            Write-Log "Downloaded main package successfully. File size: $((Get-Item $DownloadPath).Length) bytes" "INFO"
+            $response = $client.PostAsync($ApiUrl, $content).Result
+            if ($response.IsSuccessStatusCode) {
+                $fileStream = [System.IO.File]::Create($DownloadPath)
+                $response.Content.CopyToAsync($fileStream).Wait()
+                $fileStream.Close()
+                $fileStream.Dispose()
+                Write-Log "Downloaded main package successfully. Size: $((Get-Item $DownloadPath).Length) bytes" "INFO"
+            } else {
+                Write-Log "Download failed with status code: $($response.StatusCode)" "ERROR"
+                $client.Dispose()
+                return $false
+            }
+            $client.Dispose()
         } catch {
-            Write-Log "Download failed: $_" "ERROR"
-            return $false
+            Write-Log "Fast download failed: $_. Falling back to standard method..." "WARNING"
+            Invoke-WebRequest -Uri $ApiUrl -Method Post -Headers $Headers -OutFile $DownloadPath -TimeoutSec 600
         }
         
         # Validate ZIP file

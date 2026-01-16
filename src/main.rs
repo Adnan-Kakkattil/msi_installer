@@ -2,12 +2,29 @@
 #![windows_subsystem = "windows"]
 
 use std::env;
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use winapi::um::winbase::CREATE_NO_WINDOW;
+
 use winapi::um::winuser::{MessageBoxW, MB_OK, MB_ICONERROR};
 
+fn log(msg: &str) {
+    let path = std::env::temp_dir().join("Ebantis_Setup_Log.txt");
+    if let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = writeln!(file, "[EBANTIS] {}", msg);
+    }
+}
+
 fn show_error(message: &str) {
+    log(&format!("ERROR: {}", message));
     let wide: Vec<u16> = message.encode_utf16().chain(std::iter::once(0)).collect();
     let title: Vec<u16> = "Ebantis Installer Error\0".encode_utf16().chain(std::iter::once(0)).collect();
     unsafe {
@@ -150,11 +167,111 @@ fn get_installer_script_path() -> PathBuf {
     PathBuf::from("installer.ps1")
 }
 
+fn cleanup_old_installations() {
+    log("Checking for existing product registrations to scrub...");
+    
+    // Multi-stage scrubbing logic
+    let registry_nuke = r#"
+        # 1. Kill any running Ebantis processes first
+        Get-Process | Where-Object { $_.Name -like '*Ebantis*' -or $_.Name -like '*AutoUpdation*' } | Stop-Process -Force -ErrorAction SilentlyContinue
+
+        # 2. Try standard uninstallation by name
+        Get-Package -Name '*Ebantis*' -ErrorAction SilentlyContinue | Uninstall-Package -Force -ErrorAction SilentlyContinue
+
+        # 3. Search Registry for ANY ProductCode related to Ebantis
+        $paths = @(
+            "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
+            "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
+            "HKLM:\SOFTWARE\Classes\Installer\Products"
+        )
+        
+        foreach ($path in $paths) {
+            if (Test-Path $path) {
+                Get-ChildItem -Path $path | ForEach-Object {
+                    $name = $_.GetValue("ProductName")
+                    if (-not $name) { $name = $_.GetValue("DisplayName") }
+                    
+                    if ($name -like "*Ebantis*") {
+                        $code = $_.PSChildName
+                        Write-Output "Force scrubbing Product ID: $code ($name)"
+                        
+                        # If it's a GUID format (from Uninstall), use msiexec to clean internal DB
+                        if ($code -match '^\{.*\}$') {
+                            Start-Process msiexec.exe -ArgumentList "/x $code /qn /norestart" -Wait
+                        }
+                        
+                        # Nuke the registry key directly to clear the 'already installed' block
+                        Remove-Item -Path $_.PSPath -Recurse -Force -ErrorAction SilentlyContinue
+                    }
+                }
+            }
+        }
+
+        # 4. Cleanup the installation folders
+        $progFiles = "${env:ProgramFiles}\EbantisV4"
+        if (Test-Path $progFiles) {
+            Remove-Item -Path $progFiles -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    "#;
+
+    let mut cmd = Command::new("powershell.exe");
+    cmd.args(&["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", registry_nuke]);
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    let _ = cmd.status();
+    
+    log("Force cleanup routine finished.");
+}
+
+fn launch_msi_with_logging() {
+    let msi_name = "EbantisV4_Setup.msi";
+    let log_path = "C:\\Ebantis_Setup_Log.txt";
+    
+    log(&format!("Bootstrapper: Starting MSI with forced logging into {}", log_path));
+    
+    // Command: msiexec /i "EbantisV4_Setup.msi" /L*v "C:\Ebantis_Setup_Log.txt" /qn
+    let mut cmd = Command::new("msiexec.exe");
+    cmd.args(&[
+        "/i", msi_name,
+        "/L*v", log_path,
+        "/qn" // Added /qn for quiet install, remove if you want the UI
+    ]);
+    
+    match cmd.spawn() {
+        Ok(_) => log("Bootstrapper: MSI process launched successfully."),
+        Err(e) => log(&format!("Bootstrapper: Failed to launch MSI: {}", e)),
+    }
+}
+
 fn main() {
+    log("Starting Ebantis Wrapper execution");
+
+    // Get command line args to see if we are running as a Bootstrapper or inside MSI
+    let args: Vec<String> = env::args().collect();
+    
+    // If run without special MSI flags (like /i or /x), act as the Setup Bootstrapper
+    // This is a heuristic; a more robust check might involve looking for specific WiX custom action properties.
+    // For now, if the first argument is not an MSI command, assume standalone.
+    if args.len() <= 1 || (args.len() > 1 && !args[1].starts_with('/') && !args[1].ends_with(".msi")) {
+        log("Detected Standalone execution. Acting as Setup Bootstrapper...");
+        cleanup_old_installations();
+        launch_msi_with_logging();
+        // The MSI process will run independently, so we can exit.
+        // If we wanted to wait for it, we'd use cmd.status() instead of cmd.spawn().
+        std::process::exit(0); 
+    }
+
+    // --- ORIGINAL MSI CUSTOM ACTION LOGIC (when run as a custom action from MSI) ---
+    // Forcefully remove any existing traces before starting (this was moved here from the top of main)
+    cleanup_old_installations();
+    
     // Extract branch ID from MSI filename
     let branch_id = match extract_branch_id_from_msi_name() {
-        Some(id) => id,
+        Some(id) => {
+            log(&format!("Extracted Branch ID: {}", id));
+            id
+        },
         None => {
+            // If running as a custom action and branch ID can't be extracted, it's an error.
             show_error("Failed to extract branch ID from MSI filename.\n\nExpected format: installer_{branch_id}.msi or EbantisTrack_{branch_id}.msi\n\nPlease ensure the MSI file follows this naming convention.");
             std::process::exit(1);
         }
@@ -194,16 +311,18 @@ fn main() {
     // Hide PowerShell window using CREATE_NO_WINDOW flag
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
     
+    log("Executing PowerShell installer script...");
     match cmd.status() {
         Ok(status) => {
             if status.success() {
+                log("PowerShell installer script completed successfully.");
                 // Silent success - no popup
                 std::process::exit(0);
             } else {
+                log(&format!("PowerShell script failed with exit code: {}", status.code().unwrap_or(-1)));
                 // Try to get a more specific error from the log file
                 let mut error_msg = format!("Installation failed with exit code: {}", status.code().unwrap_or(-1));
                 
