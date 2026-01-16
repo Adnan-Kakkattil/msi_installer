@@ -9,3 +9,4 @@ license = "MIT"
 [dependencies]
 winapi = { version = "0.3", features = ["winuser", "shellapi", "processenv", "processthreadsapi", "handleapi", "errhandlingapi", "fileapi", "winbase", "wincon"] }
 chrono = "0.4"
+wait-timeout = "0.2"

@@ -1,0 +1,6 @@
+﻿Windows Installer XML Toolset Linker version 3.11.2.4516
+Copyright (c) .NET Foundation and contributors. All rights reserved.
+
+D:\Ebantis v4\msi_installer\wix\main.wxs(20) : warning LGHT1076 : ICE61: This product should remove only older versions of itself. The Maximum version is not less than the current product. (4.0.2 4.0.2)
+D:\Ebantis v4\msi_installer\wix\main.wxs(38) : error LGHT0204 : ICE80: This 32BitComponent InstallerExe uses 64BitDirectory INSTALLFOLDER
+D:\Ebantis v4\msi_installer\wix\main.wxs(45) : error LGHT0204 : ICE80: This 32BitComponent InstallerScript uses 64BitDirectory INSTALLFOLDER

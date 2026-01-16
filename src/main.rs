@@ -6,6 +6,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use wait_timeout::ChildExt;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 #[cfg(windows)]
@@ -247,8 +248,22 @@ fn cleanup_old_installations() {
     {
         cmd.creation_flags(CREATE_NO_WINDOW);
     }
-    let status = cmd.status();
-    log(&format!("Force cleanup routine finished with status: {:?}", status));
+    
+    match cmd.spawn() {
+        Ok(mut child) => {
+            // Wait up to 30 seconds for cleanup to finish
+            let timeout = std::time::Duration::from_secs(30);
+            match child.wait_timeout(timeout) {
+                Ok(Some(status)) => log(&format!("Force cleanup routine finished with status: {:?}", status)),
+                Ok(None) => {
+                    log("Cleanup routine timed out after 30s. Killing process and continuing...");
+                    let _ = child.kill();
+                }
+                Err(e) => log(&format!("Error waiting for cleanup: {}", e)),
+            }
+        }
+        Err(e) => log(&format!("Failed to spawn cleanup process: {}", e)),
+    }
 }
 
 fn launch_msi_with_logging() {
