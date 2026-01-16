@@ -1,33 +1,23 @@
-param(
-    [string]$branch_id
-)
+<#
+.SYNOPSIS
+    Ebantis V4 Installer - PowerShell Version
+    Complete installation flow converted from Python/Cython implementation
 
-# Logging Function (Must be defined before use)
-$LogFile = [System.IO.Path]::Combine($env:ProgramData, "EbantisV4", "Logs", "Ebantis_Setup_Log.txt")
-$logDir = [System.IO.Path]::GetDirectoryName($LogFile)
-if (-not (Test-Path $logDir)) {
-    New-Item -ItemType Directory -Path $logDir -Force | Out-Null
-}
-function Write-Log {
-    param(
-        [Parameter(Mandatory=$true)] [string]$Message,
-        [ValidateSet("INFO", "WARNING", "ERROR")] [string]$Level = "INFO"
-    )
-    $Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    $LogEntry = "$Timestamp | $Level | $Message"
-    $Color = "Cyan"
-    if ($Level -eq "ERROR") { $Color = "Red" }
-    elseif ($Level -eq "WARNING") { $Color = "Yellow" }
-   
-    Write-Host $LogEntry -ForegroundColor $Color
-    try {
-        Add-Content -Path $LogFile -Value $LogEntry -Encoding UTF8 -ErrorAction SilentlyContinue
-    } catch {}
-}
+.DESCRIPTION
+    Handles the complete installation of the Ebantis Agent, including:
+    - Prerequisite checks (Admin, Internet)
+    - Tenant Information Initialization
+    - Installation Validation
+    - Application Package Download & Extraction
+    - Folder Permission Updates
+    - Autostart Configuration
+    - Status Updates to API
 
-# Preserve branch_id across potential elevation
-if ($branch_id) { $env:EBANTIS_BRANCH_ID = $branch_id }
-if ($env:EBANTIS_BRANCH_ID -and -not $branch_id) { $branch_id = $env:EBANTIS_BRANCH_ID }
+.NOTES
+    Version: 4.0
+    Based on: installation.pyx flow
+    Excludes: Uninstaller, Wazuh installation
+#>
 
 # -------------------------------------------------------------------------
 # STEP 1: ADMIN PRIVILEGE CHECK & INITIALIZATION
@@ -47,69 +37,12 @@ if (-not (Test-IsAdmin)) {
     Exit
 }
 
-# -------------------------------------------------------------------------
-# STEP 1.5: FORCE CLEANING (Scrubbing any existing Product IDs)
-# -------------------------------------------------------------------------
-Write-Log "Initializing deep clean of previous installations..." "INFO"
-
-# 1. Terminate all Ebantis related processes
-Get-Process | Where-Object { $_.Name -like "*Ebantis*" -or $_.Name -like "*AutoUpdation*" } | Stop-Process -Force -ErrorAction SilentlyContinue
-
-# 2. Scrub Registry for Ebantis Product Codes
-$registryPaths = @(
-    "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall",
-    "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall",
-    "HKLM:\SOFTWARE\Classes\Installer\Products"
-)
-
-foreach ($regPath in $registryPaths) {
-    if (Test-Path $regPath) {
-        $keys = Get-ChildItem -Path $regPath
-        foreach ($key in $keys) {
-            $name = $key.GetValue("ProductName")
-            if (-not $name) { $displayName = $key.GetValue("DisplayName") } else { $displayName = $name }
-            
-            if ($displayName -like "*Ebantis*") {
-                $productCode = $key.PSChildName
-                Write-Log "Found existing product: $displayName ($productCode). Forcefully removing..." "WARNING"
-                
-                # If it's a GUID format (from Uninstall), use msiexec to clean internal DB
-                if ($productCode -match '^\{.*\}$') {
-                    Start-Process msiexec.exe -ArgumentList "/x $productCode /qn /norestart" -Wait
-                }
-                
-                # Nuke remaining registry keys directly to clear the 'already installed' block
-                Remove-Item -Path $key.PSPath -Recurse -Force -ErrorAction SilentlyContinue
-            }
-        }
-    }
-}
-
-# 3. Force remove the installation folder
-$installDir = "${env:ProgramFiles}\EbantisV4"
-if (Test-Path $installDir) {
-    Write-Log "Removing leftover files in $installDir" "INFO"
-    # Files might be locked, so we try multiple times
-    for ($i=1; $i -le 3; $i++) {
-        try {
-            Remove-Item -Path $installDir -Recurse -Force -ErrorAction Stop
-            break
-        } catch {
-            Write-Log "Folder removal attempt $i failed. Retrying..." "WARNING"
-            Start-Sleep -Seconds 1
-        }
-    }
-}
-
-Write-Log "Force cleaning complete." "INFO"
-
 # Configuration Constants
 $AppName = "EbantisV4"
 $ProgramFilesPath = [System.IO.Path]::Combine($env:ProgramFiles, $AppName)
 $ProgramDataPath = [System.IO.Path]::Combine($env:ProgramData, $AppName)
 $LogFolder = [System.IO.Path]::Combine($ProgramDataPath, "Logs")
-
-# Log path is set at the top
+$LogFile = [System.IO.Path]::Combine($LogFolder, "Ebantis_setup_$(Get-Date -Format 'yyyy-MM-dd').log")
 
 # Create Directories
 $DirsToCreate = @(
@@ -131,7 +64,21 @@ foreach ($Dir in $DirsToCreate) {
     }
 }
 
-# Write-Log function moved to the top
+# Logging Function
+function Write-Log {
+    param(
+        [Parameter(Mandatory=$true)] [string]$Message,
+        [ValidateSet("INFO", "WARNING", "ERROR")] [string]$Level = "INFO"
+    )
+    $Timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $LogEntry = "$Timestamp | $Level | $Message"
+    $Color = "Cyan"
+    if ($Level -eq "ERROR") { $Color = "Red" }
+    elseif ($Level -eq "WARNING") { $Color = "Yellow" }
+   
+    Write-Host $LogEntry -ForegroundColor $Color
+    Add-Content -Path $LogFile -Value $LogEntry -Encoding UTF8
+}
 
 Write-Log "Starting Ebantis V4 Installer..." "INFO"
 Write-Log "Running with administrative privileges." "INFO"
@@ -403,7 +350,7 @@ function Decrypt-Response {
 function Get-AuthToken {
     # Matches Python: get_auth_token()
     try {
-        $authApiUrl = "https://ebantisv4service.thekosmoz.com/api/v1/users/auth/login"
+        $authApiUrl = "https://qaebantisv4service.thekosmoz.com/api/v1/users/auth/login"
         $payload = @{
             userName = "internalmanager@mail.com"
             password = "#@Admin&eu1"
@@ -438,30 +385,13 @@ function Get-BranchIdFromExecutable {
         }
         
         # Try to extract from executable filename
-        $exePath = $PSCommandPath
-        if (-not $exePath) {
-            $exePath = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName
-        }
-        $exeName = Split-Path -Leaf $exePath
-        Write-Log "Current filename: $exeName" "INFO"
+        $exeName = Split-Path -Leaf $PSCommandPath
+        Write-Log "Executable name: $exeName" "INFO"
         
-        # Try to extract branch_id from format: EbantisTrack_{branch_id}.exe or .msi or installer_{branch_id}.msi
-        $branchId = $null
-        if ($exeName -match "(?:EbantisTrack_|installer_)(.+)\.(?:exe|msi)") {
+        # Try to extract branch_id from format: EbantisTrack_{branch_id}.exe or .msi
+        if ($exeName -match "EbantisTrack_(.+)\.(exe|msi)") {
             $branchId = $matches[1]
-            
-            # Handle Windows copy suffixes like " (1)", " (2)", etc.
-            if ($branchId -match "(.+) \(\d+\)$") {
-                $branchId = $matches[1]
-                Write-Log "Stripped Windows copy suffix from branch_id: $branchId" "INFO"
-            }
-            # Handle "_" suffixes (e.g. EbantisTrack_abc_1)
-            elseif ($branchId -match "(.+)_\d+$") {
-                $branchId = $matches[1]
-                Write-Log "Stripped underscore copy suffix from branch_id: $branchId" "INFO"
-            }
-            
-            Write-Log "Extracted branch_id: $branchId" "INFO"
+            Write-Log "Extracted branch_id from filename: $branchId" "INFO"
             return $branchId
         }
         
@@ -484,7 +414,7 @@ function Get-TenantInfoByBranchId {
             return $null
         }
         
-        $apiUrl = "https://ebantisv4service.thekosmoz.com/api/v1/branches/branch/$BranchId"
+        $apiUrl = "https://qaebantisv4service.thekosmoz.com/api/v1/branches/branch/$BranchId"
         $headers = @{
             "Authorization" = "Bearer $authToken"
         }
@@ -549,16 +479,16 @@ function Save-TenantInfoToJson {
 function Initialize-TenantInfo {
     # Matches Python: initialize_tenant_info()
     try {
-        # Prioritize branch_id from parameter/environment, then fallback to filename
-        $finalBranchId = if ($branch_id) { $branch_id } else { Get-BranchIdFromExecutable }
+        # Extract branch_id from executable filename
+        $branchId = Get-BranchIdFromExecutable
         
-        if (-not $finalBranchId) {
-            Write-Log "Failed to determine branch_id from parameter or filename." "ERROR"
+        if (-not $branchId) {
+            Write-Log "Failed to extract branch_id from executable filename." "ERROR"
             return $null
         }
         
         # Fetch tenant info from API using branch_id
-        $tenantInfo = Get-TenantInfoByBranchId -BranchId $finalBranchId
+        $tenantInfo = Get-TenantInfoByBranchId -BranchId $branchId
         
         if (-not $tenantInfo) {
             Write-Log "Failed to fetch tenant information from API." "ERROR"
@@ -593,7 +523,7 @@ function Get-VersionDetails {
             return $null
         }
         
-        $apiUrl = "https://ebantisv4service.thekosmoz.com/api/v1/app-versions/branches/$BranchId"
+        $apiUrl = "https://qaebantisv4service.thekosmoz.com/api/v1/app-versions/branches/$BranchId"
         $headers = @{
             "Authorization" = "Bearer $authToken"
         }
@@ -628,7 +558,7 @@ function Test-InstallationAllowed {
             return $false, $msg
         }
         
-        $apiUrl = "https://ebantisv4service.thekosmoz.com/api/v1/app-versions/branches/$BranchId"
+        $apiUrl = "https://qaebantisv4service.thekosmoz.com/api/v1/app-versions/branches/$BranchId"
         $headers = @{
             "Authorization" = "Bearer $authToken"
         }
@@ -709,7 +639,7 @@ function Update-InstallationData {
             return $false
         }
         
-        $apiUrl = "https://ebantisv4service.thekosmoz.com/api/v1/app-installations"
+        $apiUrl = "https://qaebantisv4service.thekosmoz.com/api/v1/app-installations"
         $headers = @{
             "Authorization" = "Bearer $authToken"
         }
@@ -729,15 +659,13 @@ function Update-InstallationData {
 
 function Update-InstalledDeviceCount {
     param(
+        [string]$BranchId,
         [string]$TenantId
     )
     
     # Matches Python: update_installed_device_count()
-    # IMPORTANT: Python function parameter is named "branch_id" but is called with tenant_id (line 1273)
-    # The function uses the passed value (which is actually tenant_id) in:
-    #   - URL path: /tenants/{value}/installed-count (uses tenant_id in /tenants/ endpoint)
-    #   - Payload as tenantUniqueId: {"tenantUniqueId": value, "installedDeviceCount": 1}
-    # This matches the Python implementation exactly
+    # Note: Python function takes branch_id but is called with tenant_id (line 1273)
+    # The API URL uses branch_id, but payload uses tenantUniqueId with tenant_id value
     try {
         $authToken = Get-AuthToken
         if (-not $authToken) {
@@ -746,45 +674,27 @@ function Update-InstalledDeviceCount {
             return $false, $msg
         }
         
-        # Match Python: Uses ebantisv4service and /tenants/ endpoint (not /branches/)
-        # Python: api_url = f"https://ebantisv4service.thekosmoz.com/api/v1/app-versions/tenants/{branch_id_str}/installed-count"
-        # Python line 1273: update_installed_device_count(tenant_id) - passes tenant_id
-        # The function parameter is named "branch_id" but receives tenant_id, and uses it in /tenants/ endpoint
-        $apiUrl = "https://ebantisv4service.thekosmoz.com/api/v1/app-versions/tenants/$TenantId/installed-count"
+        $apiUrl = "https://qaebantisv4service.thekosmoz.com/api/v1/app-versions/branches/$BranchId/installed-count"
         $headers = @{
             "Authorization" = "Bearer $authToken"
             "Content-Type" = "application/json"
         }
         
-        # Match Python line 567: payload uses tenantUniqueId with the value passed (tenant_id)
         $payload = @{
             tenantUniqueId = $TenantId
             installedDeviceCount = 1
         } | ConvertTo-Json
         
-        Write-Log "Updating installed device count for tenant_id: $TenantId" "INFO"
-        Write-Log "API URL: $apiUrl" "INFO"
+        Write-Log "Updating installed device count for branch_id: $BranchId" "INFO"
         Write-Log "Payload: $payload" "INFO"
         
-        try {
-            $response = Invoke-RestMethod -Uri $apiUrl -Method Put -Body $payload -ContentType "application/json" -Headers $headers -TimeoutSec 30
-            $msg = "Installed device count updated successfully for tenant_id: $TenantId"
-            Write-Log $msg "INFO"
-            return $true, $msg
-        } catch {
-            # If 404, the endpoint might not exist - log but don't fail installation
-            if ($_.Exception.Response.StatusCode.value__ -eq 404) {
-                $msg = "API endpoint not found (404). Device count update may not be supported by this API version. Installation will continue."
-                Write-Log $msg "WARNING"
-                return $false, $msg
-            } else {
-                $msg = "API request error while updating device count for tenant_id $TenantId : $_"
-                Write-Log $msg "ERROR"
-                return $false, $msg
-            }
-        }
+        $response = Invoke-RestMethod -Uri $apiUrl -Method Put -Body $payload -ContentType "application/json" -Headers $headers -TimeoutSec 30
+        
+        $msg = "Installed device count updated successfully for branch_id: $BranchId"
+        Write-Log $msg "INFO"
+        return $true, $msg
     } catch {
-        $msg = "Error updating installed device count for tenant_id $TenantId : $_"
+        $msg = "API request error while updating device count for branch_id $BranchId : $_"
         Write-Log $msg "ERROR"
         return $false, $msg
     }
@@ -796,18 +706,7 @@ function Update-InstalledDeviceCount {
 
 function Stop-EbantisProcesses {
     # Matches Python: End_task() - kills existing processes
-    # This function is called to stop processes found in folders, but we also need to stop by name
     try {
-        # First, kill processes by known names (EbantisV4, AutoUpdationService)
-        $knownProcesses = @("EbantisV4", "AutoUpdationService")
-        foreach ($ProcName in $knownProcesses) {
-            $Procs = Get-Process -Name $ProcName -ErrorAction SilentlyContinue
-            if ($Procs) {
-                Write-Log "Stopping process: $ProcName" "INFO"
-                Stop-Process -Name $ProcName -Force -ErrorAction SilentlyContinue
-            }
-        }
-        
         $MainFolder = [System.IO.Path]::Combine($ProgramFilesPath, "data", $AppName)
         $UtilsFolder = [System.IO.Path]::Combine($MainFolder, "utils")
         $UpdateFolder = [System.IO.Path]::Combine($MainFolder, "update")
@@ -849,7 +748,7 @@ function Stop-EbantisProcesses {
         }
         
         # Wait for processes to fully terminate
-        if ($knownProcesses.Count -gt 0 -or $ProcessesToKill.Count -gt 0) {
+        if ($ProcessesToKill.Count -gt 0) {
             Write-Log "Waiting for processes to terminate..." "INFO"
             Start-Sleep -Seconds 3
         }
@@ -928,11 +827,10 @@ function Download-AppPackage {
             New-Item -ItemType Directory -Path $ExtractPath -Force | Out-Null
         }
         
-        $ApiUrl = "https://ebantisapiv4.thekosmoz.com/DownloadLatestversion?branch_id=$BranchId"
+        $ApiUrl = "https://qaebantisapiv4.thekosmoz.com/DownloadLatestversion?branch_id=$BranchId"
         $Headers = @{
-            "Content-Type"   = "application/json"
             "IsInternalCall" = "true"
-            "ClientId"       = "EbantisTrack"
+            "ClientId" = "EbantisTrack"
         }
         
         Write-Log "Starting main package download from API: $ApiUrl" "INFO"
@@ -958,43 +856,22 @@ function Download-AppPackage {
             $fileSize = 0
         }
         
-        # Use HttpClient for potentially faster single-thread download 
-        # (Invoke-WebRequest is notoriously slow in PS 5.1)
+        # Download the file (single-threaded for now - multi-threaded requires complex file locking)
+        # Note: PowerShell jobs have limitations with file streams, so using single-threaded download
+        # which is still efficient for most use cases
         try {
-            Write-Log "Downloading package using HttpClient (high performance)..." "INFO"
+            Write-Log "Downloading package (streaming download)..." "INFO"
+            Invoke-WebRequest -Uri $ApiUrl -Method Post -Headers $Headers -OutFile $DownloadPath -TimeoutSec 600
             
-            $client = New-Object System.Net.Http.HttpClient
-            $client.Timeout = [System.TimeSpan]::FromMinutes(10)
-            
-            $jsonPayload = @{
-                branch_id = $BranchId
-            } | ConvertTo-Json
-            
-            $content = New-Object System.Net.Http.StringContent($jsonPayload, [System.Text.Encoding]::UTF8, "application/json")
-            
-            # Add internal headers
-            foreach ($key in $Headers.Keys) {
-                if ($key -ne "Content-Type") {
-                    $client.DefaultRequestHeaders.Add($key, $Headers[$key])
-                }
-            }
-            
-            $response = $client.PostAsync($ApiUrl, $content).Result
-            if ($response.IsSuccessStatusCode) {
-                $fileStream = [System.IO.File]::Create($DownloadPath)
-                $response.Content.CopyToAsync($fileStream).Wait()
-                $fileStream.Close()
-                $fileStream.Dispose()
-                Write-Log "Downloaded main package successfully. Size: $((Get-Item $DownloadPath).Length) bytes" "INFO"
-            } else {
-                Write-Log "Download failed with status code: $($response.StatusCode)" "ERROR"
-                $client.Dispose()
+            if (-not (Test-Path $DownloadPath) -or (Get-Item $DownloadPath).Length -eq 0) {
+                Write-Log "Download failed: File not found or empty." "ERROR"
                 return $false
             }
-            $client.Dispose()
+            
+            Write-Log "Downloaded main package successfully. File size: $((Get-Item $DownloadPath).Length) bytes" "INFO"
         } catch {
-            Write-Log "Fast download failed: $_. Falling back to standard method..." "WARNING"
-            Invoke-WebRequest -Uri $ApiUrl -Method Post -Headers $Headers -OutFile $DownloadPath -TimeoutSec 600
+            Write-Log "Download failed: $_" "ERROR"
+            return $false
         }
         
         # Validate ZIP file
@@ -1027,51 +904,48 @@ function Download-AppPackage {
             }
             
             # Find common root directory (matches Python: os.path.commonpath)
-            # Python's os.path.commonpath finds the longest common path prefix
+            # Get all unique directory paths
+            $allDirs = @()
+            foreach ($member in $members) {
+                if ($member -match '^(.+?)[/\\]') {
+                    $dirPart = $matches[1]
+                    if ($dirPart -and -not ($allDirs -contains $dirPart)) {
+                        $allDirs += $dirPart
+                    }
+                }
+            }
+            
+            # Find the longest common prefix
             $rootDir = ""
-            if ($members.Count -gt 0) {
-                # Convert all members to normalized paths (forward slashes)
-                $normalizedMembers = $members | ForEach-Object { $_.Replace('\', '/') }
+            if ($allDirs.Count -gt 0) {
+                $firstDir = $allDirs[0]
+                $rootDir = $firstDir
                 
-                # Find common prefix by comparing character by character
-                $firstMember = $normalizedMembers[0]
-                $commonPrefix = $firstMember
-                
-                foreach ($member in $normalizedMembers) {
-                    $minLen = [Math]::Min($commonPrefix.Length, $member.Length)
-                    $newPrefix = ""
-                    for ($i = 0; $i -lt $minLen; $i++) {
-                        if ($commonPrefix[$i] -eq $member[$i]) {
-                            $newPrefix += $commonPrefix[$i]
+                foreach ($dir in $allDirs) {
+                    $commonLength = 0
+                    $minLength = [Math]::Min($rootDir.Length, $dir.Length)
+                    for ($i = 0; $i -lt $minLength; $i++) {
+                        if ($rootDir[$i] -eq $dir[$i]) {
+                            $commonLength++
                         } else {
                             break
                         }
                     }
-                    # Find the last separator in the common prefix
-                    $lastSep = $newPrefix.LastIndexOfAny(@('/', '\'))
+                    # Find last separator in common part
+                    $lastSep = $rootDir.LastIndexOfAny(@('\', '/'), [Math]::Max(0, $commonLength - 1))
                     if ($lastSep -ge 0) {
-                        $commonPrefix = $newPrefix.Substring(0, $lastSep + 1)
+                        $rootDir = $rootDir.Substring(0, $lastSep + 1)
                     } else {
-                        $commonPrefix = ""
+                        $rootDir = ""
                         break
                     }
                 }
-                
-                $rootDir = $commonPrefix
             }
             
-            # Check if rootDir exists as a directory entry in the ZIP (matches Python: root_dir in members)
-            $rootDirIsMember = $false
-            if ($rootDir -and $rootDir.Length -gt 0) {
-                $rootDirNormalized = $rootDir.Replace('\', '/')
-                $rootDirIsMember = $members | Where-Object { 
-                    $normalized = $_.Replace('\', '/')
-                    $normalized -eq $rootDirNormalized -or $normalized -eq $rootDirNormalized.TrimEnd('/')
-                } | Measure-Object | Select-Object -ExpandProperty Count
-                $rootDirIsMember = $rootDirIsMember -gt 0
-            }
+            # Check if rootDir exists as a directory entry in the ZIP
+            $rootDirIsMember = $members | Where-Object { $_ -eq $rootDir -or $_ -eq $rootDir.TrimEnd('\', '/') }
             
-            Write-Log "Detected root directory in ZIP: '$rootDir' (is member: $rootDirIsMember)" "INFO"
+            Write-Log "Detected root directory in ZIP: '$rootDir' (is member: $($rootDirIsMember.Count -gt 0))" "INFO"
             
             # Extract all files
             $extractedCount = 0
@@ -1081,13 +955,10 @@ function Download-AppPackage {
                     continue
                 }
                 
-                # Determine target path (matches Python: os.path.relpath(member, root_dir))
-                $entryPath = $entry.FullName.Replace('\', '/')
-                $rootDirNormalized = $rootDir.Replace('\', '/')
-                
-                if ($rootDir -and $rootDirIsMember -and $entryPath.StartsWith($rootDirNormalized)) {
-                    # Strip the root directory (matches Python: os.path.relpath)
-                    $relativePath = $entryPath.Substring($rootDirNormalized.Length).TrimStart('/', '\')
+                # Determine target path
+                if ($rootDir -and $rootDirIsMember -and $entry.FullName.StartsWith($rootDir)) {
+                    # Strip the root directory
+                    $relativePath = $entry.FullName.Substring($rootDir.Length).TrimStart('\', '/')
                     $targetPath = [System.IO.Path]::Combine($ExtractPath, $relativePath)
                 } else {
                     # Extract directly (no root directory to strip)
@@ -1108,79 +979,20 @@ function Download-AppPackage {
             $zip.Dispose()
             Write-Log "Main package extracted successfully. Extracted $extractedCount files to: $ExtractPath" "INFO"
             
-            # Step: Move files to expected EbantisV4 folder if extracted to wrong location
-            $ebantisV4prodPath = [System.IO.Path]::Combine($ExtractPath, "EbantisV4prod")
-            $expectedEbantisV4Path = [System.IO.Path]::Combine($ExtractPath, "EbantisV4")
-            $ebantisExeInData = [System.IO.Path]::Combine($ExtractPath, "EbantisV4.exe")
-            $libFolderInData = [System.IO.Path]::Combine($ExtractPath, "lib")
+            # Verify extraction by checking for expected structure
+            $expectedExePath = [System.IO.Path]::Combine($ExtractPath, "EbantisV4", "EbantisV4.exe")
+            $expectedAutoUpdatePath = [System.IO.Path]::Combine($ExtractPath, "EbantisV4", "AutoUpdationService.exe")
             
-            # Check if files are in EbantisV4prod folder
-            if (Test-Path $ebantisV4prodPath) {
-                Write-Log "Detected files extracted to EbantisV4prod folder. Moving to expected EbantisV4 location..." "INFO"
-                try {
-                    # Remove target if it exists
-                    if (Test-Path $expectedEbantisV4Path) {
-                        Remove-Item -Path $expectedEbantisV4Path -Recurse -Force -ErrorAction SilentlyContinue
-                    }
-                    # Move entire folder
-                    Move-Item -Path $ebantisV4prodPath -Destination $expectedEbantisV4Path -Force
-                    Write-Log "Successfully moved files from EbantisV4prod to EbantisV4 folder." "INFO"
-                } catch {
-                    Write-Log "Error moving files from EbantisV4prod to EbantisV4: $_" "ERROR"
-                    # Try copying instead if move fails
-                    try {
-                        Copy-Item -Path $ebantisV4prodPath -Destination $expectedEbantisV4Path -Recurse -Force
-                        Remove-Item -Path $ebantisV4prodPath -Recurse -Force -ErrorAction SilentlyContinue
-                        Write-Log "Successfully copied files from EbantisV4prod to EbantisV4 folder (fallback method)." "INFO"
-                    } catch {
-                        Write-Log "Failed to move/copy files: $_" "ERROR"
-                    }
-                }
-            }
-            # Check if executables are directly in data folder (not in subfolder)
-            elseif (Test-Path $ebantisExeInData) {
-                Write-Log "Detected executables extracted directly to data folder. Moving to expected EbantisV4 subfolder..." "INFO"
-                try {
-                    # Create expected folder
-                    if (-not (Test-Path $expectedEbantisV4Path)) {
-                        New-Item -ItemType Directory -Path $expectedEbantisV4Path -Force | Out-Null
-                    }
-                    
-                    # Get all top-level items in extract path (excluding expected folder and other system folders)
-                    $topLevelItems = Get-ChildItem -Path $ExtractPath -ErrorAction SilentlyContinue | Where-Object {
-                        $_.Name -ne "EbantisV4" -and 
-                        $_.Name -ne "downloaded_version" -and
-                        -not $_.Name.StartsWith(".")
-                    }
-                    
-                    foreach ($item in $topLevelItems) {
-                        $targetPath = [System.IO.Path]::Combine($expectedEbantisV4Path, $item.Name)
-                        if (Test-Path $targetPath) {
-                            Remove-Item -Path $targetPath -Recurse -Force -ErrorAction SilentlyContinue
-                        }
-                        Move-Item -Path $item.FullName -Destination $targetPath -Force -ErrorAction SilentlyContinue
-                        Write-Log "Moved $($item.Name) to EbantisV4 folder" "INFO"
-                    }
-                    
-                    Write-Log "Successfully moved files from data root to EbantisV4 subfolder." "INFO"
-                } catch {
-                    Write-Log "Error moving files from data root to EbantisV4 subfolder: $_" "ERROR"
-                }
-            }
-            
-            # Find executables dynamically after extraction
-            $foundExecutables = Find-EbantisExecutables -ExtractPath $ExtractPath
-            
-            if ($foundExecutables.EbantisExe) {
-                Write-Log "Verified: EbantisV4.exe found at $($foundExecutables.EbantisExe)" "INFO"
+            if (Test-Path $expectedExePath) {
+                Write-Log "Verified: EbantisV4.exe found at $expectedExePath" "INFO"
             } else {
-                Write-Log "Warning: EbantisV4.exe not found after extraction" "WARNING"
+                Write-Log "Warning: EbantisV4.exe not found at expected path: $expectedExePath" "WARNING"
             }
             
-            if ($foundExecutables.AutoUpdateExe) {
-                Write-Log "Verified: AutoUpdationService found at $($foundExecutables.AutoUpdateExe)" "INFO"
+            if (Test-Path $expectedAutoUpdatePath) {
+                Write-Log "Verified: AutoUpdationService.exe found at $expectedAutoUpdatePath" "INFO"
             } else {
-                Write-Log "Warning: AutoUpdationService not found after extraction" "WARNING"
+                Write-Log "Warning: AutoUpdationService.exe not found at expected path: $expectedAutoUpdatePath" "WARNING"
             }
             
             # List top-level directories to help debug
@@ -1189,49 +1001,6 @@ function Download-AppPackage {
                 Write-Log "Top-level directories in extraction path:" "INFO"
                 foreach ($dir in $topLevelDirs) {
                     Write-Log "  - $($dir.Name)" "INFO"
-                }
-            }
-            
-            # Step: Move lib folder to EbantisV4 folder if it exists at data root level
-            # This handles the case where lib is extracted separately from EbantisV4 folder
-            $libFolderInData = [System.IO.Path]::Combine($ExtractPath, "lib")
-            $expectedEbantisV4Path = [System.IO.Path]::Combine($ExtractPath, "EbantisV4")
-            
-            if (Test-Path $libFolderInData) {
-                $libInEbantisV4 = [System.IO.Path]::Combine($expectedEbantisV4Path, "lib")
-                
-                # Only move if lib is not already in EbantisV4 folder
-                if (-not (Test-Path $libInEbantisV4)) {
-                    Write-Log "Detected lib folder at data root level. Moving to EbantisV4 folder..." "INFO"
-                    try {
-                        # Ensure EbantisV4 folder exists
-                        if (-not (Test-Path $expectedEbantisV4Path)) {
-                            New-Item -ItemType Directory -Path $expectedEbantisV4Path -Force | Out-Null
-                            Write-Log "Created EbantisV4 folder for lib migration" "INFO"
-                        }
-                        
-                        # Move lib folder to EbantisV4
-                        Move-Item -Path $libFolderInData -Destination $libInEbantisV4 -Force -ErrorAction Stop
-                        Write-Log "Successfully moved lib folder to EbantisV4 folder: $libInEbantisV4" "INFO"
-                    } catch {
-                        Write-Log "Error moving lib folder to EbantisV4: $_" "ERROR"
-                        # Try copying if move fails
-                        try {
-                            Copy-Item -Path $libFolderInData -Destination $libInEbantisV4 -Recurse -Force
-                            Remove-Item -Path $libFolderInData -Recurse -Force -ErrorAction SilentlyContinue
-                            Write-Log "Successfully copied lib folder to EbantisV4 folder (fallback method)" "INFO"
-                        } catch {
-                            Write-Log "Failed to move/copy lib folder: $_" "ERROR"
-                        }
-                    }
-                } else {
-                    Write-Log "lib folder already exists in EbantisV4 folder. Removing duplicate from data root..." "INFO"
-                    try {
-                        Remove-Item -Path $libFolderInData -Recurse -Force -ErrorAction SilentlyContinue
-                        Write-Log "Removed duplicate lib folder from data root" "INFO"
-                    } catch {
-                        Write-Log "Warning: Could not remove duplicate lib folder from data root: $_" "WARNING"
-                    }
                 }
             }
         } catch {
@@ -1248,8 +1017,6 @@ function Download-AppPackage {
             Write-Log "Warning: Could not remove ZIP file: $_" "WARNING"
         }
         
-        # Note: Extraction section already returned the hashtable with executables info
-        # This return is only reached if extraction succeeded
         return $true
     } catch {
         Write-Log "Main package download/extraction failed: $_" "ERROR"
@@ -1294,122 +1061,6 @@ function Update-FolderPermissions {
 }
 
 # -------------------------------------------------------------------------
-# STEP 8.5: FIND EXECUTABLES AFTER EXTRACTION
-# -------------------------------------------------------------------------
-
-function Find-EbantisExecutables {
-    # Find EbantisV4.exe and AutoUpdationService.exe dynamically after extraction
-    # Matches Python: EXE_DIREC = C:\Program Files\EbantisV4\data\EbantisV4
-    # The ZIP might extract to data\EbantisV4\ or data\EbantisV4prod\ or directly to data\
-    param([string]$ExtractPath)
-    
-    $ebantisExe = $null
-    $autoUpdateExe = $null
-    $mainFolder = $null
-    
-    # Expected location based on Python config: EXE_DIREC = data\EbantisV4
-    $expectedMainFolder = [System.IO.Path]::Combine($ExtractPath, "EbantisV4")
-    
-    # Possible locations to check (in order of preference)
-    $possibleFolders = @(
-        $expectedMainFolder,  # First check expected location: data\EbantisV4
-        [System.IO.Path]::Combine($ExtractPath, "EbantisV4prod"),  # Alternative: data\EbantisV4prod
-        $ExtractPath  # Last resort: directly in data\
-    )
-    
-    foreach ($folder in $possibleFolders) {
-        if (Test-Path $folder) {
-            $ebantisPath = [System.IO.Path]::Combine($folder, "EbantisV4.exe")
-            $autoUpdatePath = [System.IO.Path]::Combine($folder, "AutoUpdationService.exe")
-            $autoUpdatePyPath = [System.IO.Path]::Combine($folder, "AutoUpdationService.py")
-            
-            # Check if EbantisV4.exe exists
-            if (Test-Path $ebantisPath) {
-                $ebantisExe = $ebantisPath
-                $mainFolder = $folder
-                Write-Log "Found EbantisV4.exe at: $ebantisPath" "INFO"
-            }
-            
-            # Check for AutoUpdationService (prefer .exe, fallback to .py)
-            if (Test-Path $autoUpdatePath) {
-                $autoUpdateExe = $autoUpdatePath
-                if (-not $mainFolder) { $mainFolder = $folder }
-                Write-Log "Found AutoUpdationService.exe at: $autoUpdatePath" "INFO"
-            } elseif (Test-Path $autoUpdatePyPath) {
-                $autoUpdateExe = $autoUpdatePyPath
-                if (-not $mainFolder) { $mainFolder = $folder }
-                Write-Log "Found AutoUpdationService.py at: $autoUpdatePyPath" "INFO"
-            }
-            
-            # If we found both executables, we're done
-            if ($ebantisExe -and $autoUpdateExe) {
-                break
-            }
-        }
-    }
-    
-    # If executables found but in wrong location, move them to expected location
-    if ($mainFolder -and $mainFolder -ne $expectedMainFolder) {
-        Write-Log "Executables found in alternative location: $mainFolder (expected: $expectedMainFolder)" "WARNING"
-        Write-Log "Moving files to expected location..." "INFO"
-        
-        try {
-            # Ensure expected folder exists
-            if (-not (Test-Path $expectedMainFolder)) {
-                New-Item -ItemType Directory -Path $expectedMainFolder -Force | Out-Null
-            }
-            
-            # Move all files from current location to expected location
-            if (Test-Path $mainFolder) {
-                $items = Get-ChildItem -Path $mainFolder -ErrorAction SilentlyContinue
-                foreach ($item in $items) {
-                    $targetPath = [System.IO.Path]::Combine($expectedMainFolder, $item.Name)
-                    if (Test-Path $targetPath) {
-                        Remove-Item -Path $targetPath -Recurse -Force -ErrorAction SilentlyContinue
-                    }
-                    Move-Item -Path $item.FullName -Destination $targetPath -Force -ErrorAction SilentlyContinue
-                }
-                
-                # Remove empty source folder if it's not the expected one
-                if ($mainFolder -ne $expectedMainFolder) {
-                    $remainingItems = Get-ChildItem -Path $mainFolder -ErrorAction SilentlyContinue
-                    if ($remainingItems.Count -eq 0) {
-                        Remove-Item -Path $mainFolder -Force -ErrorAction SilentlyContinue
-                    }
-                }
-                
-                Write-Log "Successfully moved files to expected location: $expectedMainFolder" "INFO"
-                
-                # Update paths to point to expected location
-                $ebantisExe = [System.IO.Path]::Combine($expectedMainFolder, "EbantisV4.exe")
-                if (Test-Path $ebantisExe) {
-                    Write-Log "EbantisV4.exe now at expected location: $ebantisExe" "INFO"
-                }
-                
-                $autoUpdateExe = [System.IO.Path]::Combine($expectedMainFolder, "AutoUpdationService.exe")
-                if (-not (Test-Path $autoUpdateExe)) {
-                    $autoUpdateExe = [System.IO.Path]::Combine($expectedMainFolder, "AutoUpdationService.py")
-                }
-                if (Test-Path $autoUpdateExe) {
-                    Write-Log "AutoUpdationService now at expected location: $autoUpdateExe" "INFO"
-                }
-                
-                $mainFolder = $expectedMainFolder
-            }
-        } catch {
-            Write-Log "Error moving files to expected location: $_" "ERROR"
-            Write-Log "Continuing with current location..." "WARNING"
-        }
-    }
-    
-    return @{
-        EbantisExe = $ebantisExe
-        AutoUpdateExe = $autoUpdateExe
-        MainFolder = if ($mainFolder) { $mainFolder } else { $expectedMainFolder }
-    }
-}
-
-# -------------------------------------------------------------------------
 # STEP 9: AUTOSTART CONFIGURATION
 # -------------------------------------------------------------------------
 
@@ -1449,44 +1100,18 @@ function Start-EbantisProcesses {
 
 function Add-StartupShortcuts {
     # Matches Python: autostart.pyx -> Autostart() - terminates processes FIRST, then starts, then creates shortcuts
-    param(
-        [string]$TargetExe = $null,
-        [string]$AutoUpdateExe = $null,
-        [string]$MainFolder = $null
-    )
-    
     try {
         $StartupFolder = [System.IO.Path]::Combine($env:ProgramData, "Microsoft\Windows\Start Menu\Programs\StartUp")
-        
-        # If paths not provided, try to find them dynamically
-        if (-not $TargetExe -or -not $AutoUpdateExe -or -not $MainFolder) {
-            $ExtractPath = [System.IO.Path]::Combine($ProgramFilesPath, "data")
-            $found = Find-EbantisExecutables -ExtractPath $ExtractPath
-            
-            if (-not $TargetExe) { $TargetExe = $found.EbantisExe }
-            if (-not $AutoUpdateExe) { $AutoUpdateExe = $found.AutoUpdateExe }
-            if (-not $MainFolder) { $MainFolder = $found.MainFolder }
+        $MainFolder = [System.IO.Path]::Combine($ProgramFilesPath, "data", $AppName)
+        $TargetExe = [System.IO.Path]::Combine($MainFolder, "EbantisV4.exe")
+        # Check for both .exe and .py versions of AutoUpdationService
+        $AutoUpdateExe = [System.IO.Path]::Combine($MainFolder, "AutoUpdationService.exe")
+        $AutoUpdatePy = [System.IO.Path]::Combine($MainFolder, "AutoUpdationService.py")
+        # Use .exe if available, otherwise .py
+        if (-not (Test-Path $AutoUpdateExe) -and (Test-Path $AutoUpdatePy)) {
+            $AutoUpdateExe = $AutoUpdatePy
+            Write-Log "Using AutoUpdationService.py (AutoUpdationService.exe not found)" "INFO"
         }
-        
-        # Fallback to default paths if still not found
-        if (-not $MainFolder) {
-            $MainFolder = [System.IO.Path]::Combine($ProgramFilesPath, "data", $AppName)
-        }
-        if (-not $TargetExe) {
-            $TargetExe = [System.IO.Path]::Combine($MainFolder, "EbantisV4.exe")
-        }
-        if (-not $AutoUpdateExe) {
-            $AutoUpdateExe = [System.IO.Path]::Combine($MainFolder, "AutoUpdationService.exe")
-            if (-not (Test-Path $AutoUpdateExe)) {
-                $AutoUpdatePy = [System.IO.Path]::Combine($MainFolder, "AutoUpdationService.py")
-                if (Test-Path $AutoUpdatePy) {
-                    $AutoUpdateExe = $AutoUpdatePy
-                    Write-Log "Using AutoUpdationService.py (AutoUpdationService.exe not found)" "INFO"
-                }
-            }
-        }
-        
-        Write-Log "=== Autostart Process Started ===" "INFO"
         
         Write-Log "=== Autostart Process Started ===" "INFO"
         
@@ -1612,7 +1237,8 @@ try {
     $isAllowed, $message = Test-InstallationAllowed -BranchId $BranchId
     if (-not $isAllowed) {
         Write-Log $message "ERROR"
-        # Removed Read-Host to prevent hanging in MSI/silent mode
+        Write-Host $message -ForegroundColor Red
+        Read-Host "Press Enter to exit..."
         Exit 1
     }
     
@@ -1620,20 +1246,9 @@ try {
     Write-Log "Recording installation start..." "INFO"
     Update-InstallationData -TenantId $TenantId -BranchId $BranchId -StatusFlag $false -InstallationFlag $false -Status "inprogress"
     
-    # Step 5: Stop existing processes FIRST (before removal/extraction)
-    Write-Log "Stopping existing Ebantis processes..." "INFO"
-    $processesToKill = @("EbantisV4", "AutoUpdationService")
-    foreach ($procName in $processesToKill) {
-        $procs = Get-Process -Name $procName -ErrorAction SilentlyContinue
-        if ($procs) {
-            Write-Log "Stopping process: $procName" "INFO"
-            Stop-Process -Name $procName -Force -ErrorAction SilentlyContinue
-        }
-    }
-    Start-Sleep -Seconds 3  # Wait for processes to fully terminate
-    
-    # Step 5.5: Remove old installation
+    # Step 5: Stop existing processes and remove old installation
     Write-Log "Clearing previous version (if installed)..." "INFO"
+    Stop-EbantisProcesses
     Remove-ExistingInstallation
     Remove-StartupFile  # Remove old .bat files from startup
     Start-Sleep -Seconds 2
@@ -1664,94 +1279,6 @@ try {
     Write-Log "Updating installation status - download complete..." "INFO"
     Update-InstallationData -TenantId $TenantId -BranchId $BranchId -StatusFlag $true -InstallationFlag $false -Status "inprogress"
     
-    # Step 7.5: Find and start executables immediately after extraction
-    Write-Log "Locating and starting executables after extraction..." "INFO"
-    $ExtractPath = [System.IO.Path]::Combine($ProgramFilesPath, "data")
-    $foundExecutables = Find-EbantisExecutables -ExtractPath $ExtractPath
-    
-    $ebantisExePath = $foundExecutables.EbantisExe
-    $autoUpdateExePath = $foundExecutables.AutoUpdateExe
-    $mainFolderPath = $foundExecutables.MainFolder
-    
-    # Start EbantisV4.exe immediately if found
-    if ($ebantisExePath -and $mainFolderPath) {
-        try {
-            Write-Log "Starting EbantisV4.exe immediately after extraction..." "INFO"
-            Write-Log "Executable path: $ebantisExePath" "INFO"
-            Write-Log "Working directory: $mainFolderPath" "INFO"
-            
-            $ebantisProcess = Start-Process -FilePath $ebantisExePath -WorkingDirectory $mainFolderPath -PassThru -ErrorAction Stop
-            Write-Log "Started: $ebantisExePath (PID: $($ebantisProcess.Id))" "INFO"
-            
-            # Verify process is running
-            Start-Sleep -Seconds 2
-            $verifyProcess = Get-Process -Id $ebantisProcess.Id -ErrorAction SilentlyContinue
-            if ($verifyProcess) {
-                Write-Log "Verified: EbantisV4 process is running (PID: $($verifyProcess.Id), Name: $($verifyProcess.ProcessName))" "INFO"
-            } else {
-                Write-Log "Warning: EbantisV4 process started but not found after verification" "WARNING"
-            }
-        } catch {
-            Write-Log "Error starting EbantisV4.exe: $_" "ERROR"
-        }
-    } else {
-        Write-Log "EbantisV4.exe not found, cannot start immediately" "WARNING"
-        if (-not $ebantisExePath) {
-            Write-Log "EbantisV4.exe path is null" "WARNING"
-        }
-        if (-not $mainFolderPath) {
-            Write-Log "Main folder path is null" "WARNING"
-        }
-    }
-    
-    # Start AutoUpdationService immediately if found
-    if ($autoUpdateExePath -and $mainFolderPath) {
-        try {
-            Write-Log "Starting AutoUpdationService immediately after extraction..." "INFO"
-            Write-Log "Executable path: $autoUpdateExePath" "INFO"
-            Write-Log "Working directory: $mainFolderPath" "INFO"
-            
-            $autoUpdateProcess = Start-Process -FilePath $autoUpdateExePath -WorkingDirectory $mainFolderPath -PassThru -ErrorAction Stop
-            Write-Log "Started: $autoUpdateExePath (PID: $($autoUpdateProcess.Id))" "INFO"
-            
-            # Verify process is running
-            Start-Sleep -Seconds 2
-            $verifyProcess = Get-Process -Id $autoUpdateProcess.Id -ErrorAction SilentlyContinue
-            if ($verifyProcess) {
-                Write-Log "Verified: AutoUpdationService process is running (PID: $($verifyProcess.Id), Name: $($verifyProcess.ProcessName))" "INFO"
-            } else {
-                Write-Log "Warning: AutoUpdationService process started but not found after verification" "WARNING"
-            }
-        } catch {
-            Write-Log "Error starting AutoUpdationService: $_" "ERROR"
-        }
-    } else {
-        Write-Log "AutoUpdationService not found, cannot start immediately" "WARNING"
-        if (-not $autoUpdateExePath) {
-            Write-Log "AutoUpdationService path is null" "WARNING"
-        }
-        if (-not $mainFolderPath) {
-            Write-Log "Main folder path is null" "WARNING"
-        }
-    }
-    
-    # Final verification: Check if processes are running by name
-    Start-Sleep -Seconds 1
-    $runningEbantis = Get-Process -Name "EbantisV4" -ErrorAction SilentlyContinue
-    $runningAutoUpdate = Get-Process -Name "AutoUpdationService" -ErrorAction SilentlyContinue
-    
-    if ($runningEbantis) {
-        Write-Log "Final verification: EbantisV4 is running (PIDs: $($runningEbantis.Id -join ', '))" "INFO"
-    } else {
-        Write-Log "Final verification: EbantisV4 is NOT running" "WARNING"
-    }
-    
-    if ($runningAutoUpdate) {
-        Write-Log "Final verification: AutoUpdationService is running (PIDs: $($runningAutoUpdate.Id -join ', '))" "INFO"
-    } else {
-        Write-Log "Final verification: AutoUpdationService is NOT running" "WARNING"
-    }
-    
     # Step 8: Update folder permissions
     Write-Log "Updating folder permissions..." "INFO"
     $UsersFolder = [System.IO.Path]::Combine($ProgramDataPath, "user_collection")
@@ -1777,9 +1304,9 @@ try {
         Write-Log "Some folder permission updates failed, but continuing..." "WARNING"
     }
     
-    # Step 9: Configure autostart (executables already started above)
+    # Step 9: Configure autostart and start processes
     Write-Log "Setting up autostart..." "INFO"
-    $autostartSuccess = Add-StartupShortcuts -TargetExe $ebantisExePath -AutoUpdateExe $autoUpdateExePath -MainFolder $mainFolderPath
+    $autostartSuccess = Add-StartupShortcuts
     
     # Step 10: Start additional executables from utils and update folders
     Write-Log "Starting additional executables..." "INFO"
@@ -1791,8 +1318,7 @@ try {
         Update-InstallationData -TenantId $TenantId -BranchId $BranchId -StatusFlag $true -InstallationFlag $true -Status "installed"
         
         # Update installed device count
-        # Match Python line 1273: update_installed_device_count(tenant_id) - passes tenant_id, not branch_id
-        $countModifyFlag, $countMessage = Update-InstalledDeviceCount -TenantId $TenantId
+        $countModifyFlag, $countMessage = Update-InstalledDeviceCount -BranchId $BranchId -TenantId $TenantId
         Write-Log "Installed device count update: $countModifyFlag, message: $countMessage" "INFO"
     } else {
         Write-Log "Installation completed but autostart configuration failed." "WARNING"
