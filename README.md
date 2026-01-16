@@ -66,3 +66,88 @@ msi_installer/
 - The MSI requires administrator privileges
 - The PowerShell script will request elevation if not running as admin
 - The branch ID must be in the MSI filename for the installer to work
+
+## Troubleshooting
+
+### Issue: Installation enters "Maintenance Mode" and skips installation
+
+**Symptoms:**
+- MSI log shows: `Product registered: entering maintenance mode`
+- Custom actions are skipped: `Skipping action: RunInstaller (condition is false)`
+- Installation completes but no files are installed
+
+**Cause:**
+Windows Installer detects that the Product Code is already registered on the system, so it enters maintenance mode instead of performing a fresh installation.
+
+**Solutions:**
+
+1. **Uninstall the previous version first:**
+   ```powershell
+   # Find the Product Code from the MSI or registry
+   # Then uninstall:
+   msiexec /x "{ProductCode}" /qn
+   ```
+
+2. **Use Repair/Reinstall with REINSTALLMODE:**
+   ```powershell
+   # Force reinstall all files
+   msiexec /i "installer_{branch_id}.msi" /qn REINSTALLMODE=vamus REINSTALL=ALL
+   ```
+
+3. **For testing, use a different Product Code:**
+   - Change the Product Code in `wix/main.wxs` (set `Product Id` to `*` for auto-generation)
+   - Or increment the version number to trigger an upgrade
+
+4. **The installer now runs on upgrades:**
+   - The WiX configuration has been updated to run the installer script during upgrades, repairs, and fresh installs
+   - The condition `NOT REMOVE` ensures it runs on any installation scenario except uninstall
+
+### Issue: Custom actions not running
+
+**Check the MSI log for:**
+- `Skipping action: RunInstaller (condition is false)` - This means the condition evaluated to false
+- Verify that files are being copied (look for `Installing:` messages)
+
+**Solutions:**
+- Ensure you're not in uninstall mode (`REMOVE="ALL"` means uninstall)
+- Check that files are actually being installed (`InstallFiles` action should run before `RunInstaller`)
+
+### Testing Installation
+
+**For fresh installation test:**
+```powershell
+# Uninstall first (if installed)
+msiexec /x "{ProductCode}" /qn
+
+# Then install
+msiexec /i "installer_{branch_id}.msi" /qn /L*v "install.log"
+```
+
+**For upgrade test:**
+```powershell
+# Just install with the new MSI - it will upgrade automatically
+msiexec /i "installer_{branch_id}.msi" /qn /L*v "upgrade.log"
+```
+
+**To view verbose logs:**
+```powershell
+msiexec /i "installer_{branch_id}.msi" /qn /L*v "C:\Users\YourName\install.log"
+```
+
+## Uninstallation
+
+The MSI installer includes a complete uninstallation flow:
+
+1. When user clicks "Remove" in Programs and Features
+2. MSI custom action runs `uninstaller.ps1` before files are removed
+3. Uninstaller script:
+   - Kills all Ebantis processes
+   - Removes startup shortcuts
+   - Removes all files and folders
+   - Updates API status to "Uninstalled"
+4. MSI continues with standard cleanup
+
+To manually uninstall:
+```powershell
+msiexec /x "{ProductCode}" /qn
+```

@@ -13,12 +13,19 @@
                  Description="Ebantis V4 Agent Installation"
                  Comments="Installs Ebantis V4 Agent using PowerShell installer script"/>
         
-        <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+        <!-- MajorUpgrade configuration: AllowSameVersionUpgrades="yes" allows reinstalling same version -->
+        <MajorUpgrade 
+            DowngradeErrorMessage="A newer version of [ProductName] is already installed."
+            AllowSameVersionUpgrades="yes"
+            Schedule="afterInstallInitialize" />
         
         <MediaTemplate EmbedCab="yes" />
         
         <!-- Property to store MSI filename (will be set by custom action) -->
         <Property Id="MSI_FILENAME" Secure="yes" />
+        
+        <!-- Property to track if we should run installer (set to 1 by default) -->
+        <Property Id="RUNINSTALLER" Value="1" Secure="yes" />
         
         <!-- Installer executable -->
         <Directory Id="TARGETDIR" Name="SourceDir">
@@ -36,11 +43,19 @@
                               Source="installer.ps1" 
                               KeyPath="yes"/>
                     </Component>
+                    
+                    <!-- PowerShell uninstaller script -->
+                    <Component Id="UninstallerScript" Guid="C3C3C3C3-C3C3-C3C3-C3C3-C3C3C3C3C3C3">
+                        <File Id="UninstallerScriptFile" 
+                              Source="uninstaller.ps1" 
+                              KeyPath="yes"/>
+                    </Component>
                 </Directory>
             </Directory>
         </Directory>
         
         <!-- Set property to pass OriginalDatabase (MSI filename) to executable -->
+        <!-- This should run for both fresh installs and upgrades -->
         <CustomAction Id="SetMsiFilename" 
                       Property="MSI_FILENAME" 
                       Value="[OriginalDatabase]" 
@@ -48,6 +63,7 @@
         
         <!-- Custom action to run installer with MSI filename as argument -->
         <!-- Use "check" return type so it blocks and reports failure to MSI if it fails -->
+        <!-- This runs on installation, upgrade, and repair -->
         <CustomAction Id="RunInstaller" 
                       Directory="INSTALLFOLDER" 
                       ExeCommand='"[INSTALLFOLDER]ebantis-msi-installer.exe" "[MSI_FILENAME]"' 
@@ -55,15 +71,35 @@
                       Impersonate="no" 
                       Return="check"/>
         
+        <!-- Custom action to run uninstaller before files are removed -->
+        <!-- Use "check" return type so it blocks and reports failure to MSI if it fails -->
+        <!-- Run with uninstall flag -->
+        <CustomAction Id="RunUninstaller" 
+                      Directory="INSTALLFOLDER" 
+                      ExeCommand='"[INSTALLFOLDER]ebantis-msi-installer.exe" "-uninstall"' 
+                      Execute="deferred" 
+                      Impersonate="no" 
+                      Return="check"/>
+        
         <InstallExecuteSequence>
-            <Custom Action="SetMsiFilename" After="InstallInitialize">NOT Installed</Custom>
-            <!-- Run installer after files are installed but before finalize -->
-            <Custom Action="RunInstaller" After="InstallFiles">NOT Installed</Custom>
+            <!-- Set MSI filename for both fresh installs and upgrades -->
+            <!-- NOT REMOVE means: run if we're installing/upgrading, not uninstalling -->
+            <Custom Action="SetMsiFilename" After="InstallInitialize">NOT REMOVE</Custom>
+            
+            <!-- Run installer after files are installed -->
+            <!-- Condition: NOT REMOVE ensures it runs on install/upgrade/repair but not uninstall -->
+            <!-- REINSTALLMODE checks if any reinstall flags are set (repair scenarios) -->
+            <Custom Action="RunInstaller" After="InstallFiles">NOT REMOVE</Custom>
+            
+            <!-- Run uninstaller before files are removed during uninstallation -->
+            <!-- This runs before RemoveFiles action -->
+            <Custom Action="RunUninstaller" Before="RemoveFiles">REMOVE="ALL"</Custom>
         </InstallExecuteSequence>
         
         <Feature Id="ProductFeature" Title="Ebantis V4 Installer" Level="1">
             <ComponentRef Id="InstallerExe" />
             <ComponentRef Id="InstallerScript" />
+            <ComponentRef Id="UninstallerScript" />
         </Feature>
         
         <UI>

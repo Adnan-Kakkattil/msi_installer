@@ -16,7 +16,7 @@ Path(PROGRAM_DATA_PATH).mkdir(parents=True, exist_ok=True)
 # LOG_FOLDER = r"D:\EbantisSetup"
 LOG_FOLDER = os.getcwd()
 
-CLOUD_DOWNLOAD_API = "https://qaebantisapiv4.thekosmoz.com/DownloadLatestversion"
+CLOUD_DOWNLOAD_API = "https://ebantisapiv4.thekosmoz.com/DownloadLatestversion"
 # CLOUD_DOWNLOAD_API = "https://ebantisaiv3api.thekosmoz.com/api/v1.0/DownloadLatestversion"
 UPDATE_FOLDER_PATH = os.path.join(PROGRAM_FILES_PATH, "data", "EbantisV4", "update")
 UPDATION_DIREC = os.path.join(PROGRAM_FILES_PATH, "data")

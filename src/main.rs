@@ -132,43 +132,103 @@ fn extract_branch_id_from_msi_name() -> Option<String> {
     None
 }
 
-fn get_installer_script_path() -> PathBuf {
+fn get_script_path(is_uninstall: bool) -> PathBuf {
     // Get the directory where the executable is located
     let exe_dir = env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
         .unwrap_or_else(|| PathBuf::from("."));
     
-    // Look for installer.ps1 in the same directory
-    let script_path = exe_dir.join("installer.ps1");
+    // Look for installer.ps1 or uninstaller.ps1 in the same directory
+    let script_name = if is_uninstall { "uninstaller.ps1" } else { "installer.ps1" };
+    let script_path = exe_dir.join(script_name);
     
     if script_path.exists() {
         return script_path;
     }
     
     // Fallback: try current directory
-    PathBuf::from("installer.ps1")
+    PathBuf::from(script_name)
 }
 
-fn main() {
+fn execute_uninstaller() -> i32 {
+    // For uninstallation, we don't need branch ID
+    let script_path = get_script_path(true);
+    
+    if !script_path.exists() {
+        show_error(&format!(
+            "PowerShell uninstaller script not found at:\n{}\n\nPlease ensure uninstaller.ps1 is in the same directory as the MSI.",
+            script_path.display()
+        ));
+        return 1;
+    }
+    
+    // Execute PowerShell uninstaller script with admin privileges
+    let mut cmd = Command::new("powershell.exe");
+    cmd.args(&[
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-WindowStyle",
+        "Hidden",
+        "-File",
+        script_path.to_str().unwrap(),
+    ]);
+    cmd.stdin(Stdio::null());
+    cmd.stdout(Stdio::null());  // Suppress output
+    cmd.stderr(Stdio::null());  // Suppress errors
+    // Hide PowerShell window using CREATE_NO_WINDOW flag
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    
+    match cmd.status() {
+        Ok(status) => {
+            if status.success() {
+                // Silent success - no popup
+                return 0;
+            } else {
+                // Try to get a more specific error from the log file
+                let mut error_msg = format!("Uninstallation failed with exit code: {}", status.code().unwrap_or(-1));
+                
+                if let Some(specific_error) = get_last_error_from_log() {
+                    error_msg = format!("{}\n\nReason: {}", error_msg, specific_error);
+                }
+                
+                error_msg = format!("{}\n\nPlease check the log files in C:\\ProgramData\\EbantisV4\\Logs for more details.", error_msg);
+                
+                show_error(&error_msg);
+                return 1;
+            }
+        }
+        Err(e) => {
+            show_error(&format!("Failed to execute uninstaller: {}\n\nPlease ensure PowerShell is available and you have administrative privileges.", e));
+            return 1;
+        }
+    }
+}
+
+fn execute_installer() -> i32 {
     // Extract branch ID from MSI filename
     let branch_id = match extract_branch_id_from_msi_name() {
         Some(id) => id,
         None => {
             show_error("Failed to extract branch ID from MSI filename.\n\nExpected format: installer_{branch_id}.msi or EbantisTrack_{branch_id}.msi\n\nPlease ensure the MSI file follows this naming convention.");
-            std::process::exit(1);
+            return 1;
         }
     };
     
-    // Get PowerShell script path
-    let script_path = get_installer_script_path();
+    // Get PowerShell installer script path
+    let script_path = get_script_path(false);
     
     if !script_path.exists() {
         show_error(&format!(
             "PowerShell installer script not found at:\n{}\n\nPlease ensure installer.ps1 is in the same directory as the MSI.",
             script_path.display()
         ));
-        std::process::exit(1);
+        return 1;
     }
     
     // Set environment variable for branch ID
@@ -202,7 +262,7 @@ fn main() {
         Ok(status) => {
             if status.success() {
                 // Silent success - no popup
-                std::process::exit(0);
+                return 0;
             } else {
                 // Try to get a more specific error from the log file
                 let mut error_msg = format!("Installation failed with exit code: {}", status.code().unwrap_or(-1));
@@ -214,12 +274,39 @@ fn main() {
                 error_msg = format!("{}\n\nPlease check the log files in C:\\ProgramData\\EbantisV4\\Logs for more details.", error_msg);
                 
                 show_error(&error_msg);
-                std::process::exit(1);
+                return 1;
             }
         }
         Err(e) => {
             show_error(&format!("Failed to execute installer: {}\n\nPlease ensure PowerShell is available and you have administrative privileges.", e));
-            std::process::exit(1);
+            return 1;
         }
     }
+}
+
+fn main() {
+    // Check command-line arguments for uninstall flag
+    let args: Vec<String> = env::args().collect();
+    let is_uninstall = args.iter().any(|arg| {
+        arg.eq_ignore_ascii_case("-uninstall") || 
+        arg.eq_ignore_ascii_case("--uninstall") ||
+        arg.eq_ignore_ascii_case("/uninstall") ||
+        arg.eq_ignore_ascii_case("uninstall")
+    });
+    
+    // Check environment variable (set by WiX during uninstall)
+    let is_uninstall_env = env::var("REMOVE").as_ref()
+        .map(|v| v == "ALL")
+        .unwrap_or(false) || 
+        env::var("ACTION").as_ref()
+        .map(|v| v == "REMOVE" || v == "UNINSTALL")
+        .unwrap_or(false);
+    
+    let exit_code = if is_uninstall || is_uninstall_env {
+        execute_uninstaller()
+    } else {
+        execute_installer()
+    };
+    
+    std::process::exit(exit_code);
 }
