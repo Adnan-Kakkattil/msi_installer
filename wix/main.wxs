@@ -5,7 +5,7 @@
              Language="1033" 
              Version="4.0.2" 
              Manufacturer="Ebantis" 
-             UpgradeCode="36851736-5317-4697-b7ab-835c2037698f">
+             UpgradeCode="$(var.UpgradeCode)">
         
         <Package InstallerVersion="200"     
                  Compressed="yes" 
@@ -23,8 +23,9 @@
         
         <MediaTemplate EmbedCab="yes" />
         
-        <!-- Property to store MSI filename -->
+        <!-- Property to store MSI filename and Branch ID -->
         <Property Id="MSI_FILENAME" Secure="yes" />
+        <Property Id="EBANTIS_BRANCH_ID" Secure="yes" />
         
         <!-- Enable automatic MSI logging to TEMP folder for guaranteed permissions -->
         <Property Id="MsiLogging" Value="voicewarmupx" />
@@ -60,7 +61,7 @@
         <!-- Use "check" return type so it blocks and reports failure to MSI if it fails -->
         <CustomAction Id="RunInstaller" 
                       Directory="INSTALLFOLDER" 
-                      ExeCommand='"[INSTALLFOLDER]ebantis-msi-installer.exe" "[MSI_FILENAME]"' 
+                      ExeCommand='"[INSTALLFOLDER]ebantis-msi-installer.exe" "[MSI_FILENAME]" "[EBANTIS_BRANCH_ID]"' 
                       Execute="deferred" 
                       Impersonate="no" 
                       Return="check"/>

@@ -3,7 +3,11 @@ param(
 )
 
 # Logging Function (Must be defined before use)
-$LogFile = [System.IO.Path]::Combine($env:TEMP, "Ebantis_Setup_Log.txt")
+$LogFile = [System.IO.Path]::Combine($env:ProgramData, "EbantisV4", "Logs", "Ebantis_Setup_Log.txt")
+$logDir = [System.IO.Path]::GetDirectoryName($LogFile)
+if (-not (Test-Path $logDir)) {
+    New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+}
 function Write-Log {
     param(
         [Parameter(Mandatory=$true)] [string]$Message,

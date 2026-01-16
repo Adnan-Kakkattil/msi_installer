@@ -14,13 +14,20 @@ use winapi::um::winbase::CREATE_NO_WINDOW;
 use winapi::um::winuser::{MessageBoxW, MB_OK, MB_ICONERROR};
 
 fn log(msg: &str) {
-    let path = std::env::temp_dir().join("Ebantis_Setup_Log.txt");
+    let program_data = std::env::var("ProgramData").unwrap_or_else(|_| "C:\\ProgramData".to_string());
+    let log_dir = PathBuf::from(program_data).join("EbantisV4").join("Logs");
+    
+    // Ensure log directory exists
+    let _ = std::fs::create_dir_all(&log_dir);
+    
+    let path = log_dir.join("Ebantis_Setup_Log.txt");
     if let Ok(mut file) = OpenOptions::new()
         .create(true)
         .append(true)
         .open(path)
     {
-        let _ = writeln!(file, "[EBANTIS] {}", msg);
+        let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+        let _ = writeln!(file, "{} | [EBANTIS] {}", timestamp, msg);
     }
 }
 
@@ -28,12 +35,16 @@ fn show_error(message: &str) {
     log(&format!("ERROR: {}", message));
     let wide: Vec<u16> = message.encode_utf16().chain(std::iter::once(0)).collect();
     let title: Vec<u16> = "Ebantis Installer Error\0".encode_utf16().chain(std::iter::once(0)).collect();
+    
+    // Add MB_SERVICE_NOTIFICATION (0x00200000L) to ensure it shows up if run as SYSTEM
+    const MB_SERVICE_NOTIFICATION: u32 = 0x00200000;
+    
     unsafe {
         MessageBoxW(
             std::ptr::null_mut(),
             wide.as_ptr(),
             title.as_ptr(),
-            MB_OK | MB_ICONERROR
+            MB_OK | MB_ICONERROR | MB_SERVICE_NOTIFICATION
         );
     }
 }
@@ -78,26 +89,39 @@ fn get_last_error_from_log() -> Option<String> {
 }
 
 fn extract_branch_id_from_msi_name() -> Option<String> {
-    // Try multiple methods to get the MSI file path:
-    // 1. Command-line argument (passed from WiX custom action)
-    // 2. OriginalDatabase environment variable
-    // 3. Executable path (env::args().nth(0))
-    // 4. INSTALLER_PATH environment variable
-    
+    log("Attempting to extract Branch ID...");
+
+    // Try environment variable first (if passed by MSI property)
+    if let Ok(id) = env::var("EBANTIS_BRANCH_ID") {
+        if !id.is_empty() && id != "[EBANTIS_BRANCH_ID]" {
+            log(&format!("Found Branch ID in environment variable: {}", id));
+            return Some(id);
+        }
+    }
+
+    // Try 2nd command line argument (passed from WiX custom action)
+    if let Some(id) = env::args().nth(2) {
+        if !id.is_empty() && id != "[EBANTIS_BRANCH_ID]" {
+            log(&format!("Found Branch ID in command line argument 2: {}", id));
+            return Some(id);
+        }
+    }
+
     let msi_path = env::args()
         .nth(1)  // First argument after executable name
         .or_else(|| env::var("OriginalDatabase").ok())
-        .or_else(|| env::args().nth(0))
-        .or_else(|| env::var("INSTALLER_PATH").ok());
+        .or_else(|| env::var("INSTALLER_PATH").ok())
+        .or_else(|| env::args().nth(0));
     
+    log(&format!("MSI Path detected: {:?}", msi_path));
+
     if let Some(path) = msi_path {
         let path_buf = PathBuf::from(&path);
         if let Some(file_name) = path_buf.file_name() {
             if let Some(name_str) = file_name.to_str() {
-                // Extract branch_id from format: installer_{branch_id}.msi or EbantisTrack_{branch_id}.msi
-                // Branch ID can be any format (including UUIDs with hyphens)
+                log(&format!("Analyzing filename: {}", name_str));
                 
-                // Find where the extension starts (handle cases like .msi or .exe)
+                // Find where the extension starts
                 let end_pos = name_str.rfind('.').unwrap_or(name_str.len());
                 let base_name = &name_str[..end_pos];
 
@@ -113,10 +137,10 @@ fn extract_branch_id_from_msi_name() -> Option<String> {
                 }
 
                 if let Some(mut id) = extracted_id {
+                    log(&format!("Initial extraction: {}", id));
                     // Handle Windows copy suffixes like " (1)", " (2)", etc.
                     if let Some(pos) = id.rfind(" (") {
                         let suffix = &id[pos..];
-                        // Check if suffix matches " (\d+)"
                         if suffix.starts_with(" (") && suffix.ends_with(')') {
                             let inner = &suffix[2..suffix.len()-1];
                             if !inner.is_empty() && inner.chars().all(|c| c.is_ascii_digit()) {
@@ -125,14 +149,9 @@ fn extract_branch_id_from_msi_name() -> Option<String> {
                         }
                     }
                     
-                    // Also handle "_" suffixes if they exist (sometimes browsers do this)
                     if let Some(pos) = id.rfind('_') {
                         let suffix = &id[pos+1..];
                         if !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) {
-                            // Only strip if it's likely a copy suffix (e.g. EbantisTrack_abc_1)
-                            // This is a bit riskier as branch IDs might have underscores, 
-                            // but usually they are UUIDs or alphanumeric.
-                            // We only strip if the part before is not empty.
                             if pos > 0 {
                                 id = id[..pos].to_string();
                             }
@@ -140,6 +159,7 @@ fn extract_branch_id_from_msi_name() -> Option<String> {
                     }
 
                     if !id.is_empty() {
+                        log(&format!("Final extracted Branch ID: {}", id));
                         return Some(id);
                     }
                 }
@@ -147,6 +167,7 @@ fn extract_branch_id_from_msi_name() -> Option<String> {
         }
     }
     
+    log("Failed to extract Branch ID from any source.");
     None
 }
 
@@ -174,7 +195,11 @@ fn cleanup_old_installations() {
     // Multi-stage scrubbing logic
     let registry_nuke = r#"
         # 1. Kill any running Ebantis processes first
-        Get-Process | Where-Object { $_.Name -like '*Ebantis*' -or $_.Name -like '*AutoUpdation*' } | Stop-Process -Force -ErrorAction SilentlyContinue
+        $procs = Get-Process | Where-Object { $_.Name -like '*Ebantis*' -or $_.Name -like '*AutoUpdation*' }
+        if ($procs) {
+            Write-Host "Stopping $($procs.Count) processes..."
+            $procs | Stop-Process -Force -ErrorAction SilentlyContinue
+        }
 
         # 2. Try standard uninstallation by name
         Get-Package -Name '*Ebantis*' -ErrorAction SilentlyContinue | Uninstall-Package -Force -ErrorAction SilentlyContinue
@@ -188,17 +213,17 @@ fn cleanup_old_installations() {
         
         foreach ($path in $paths) {
             if (Test-Path $path) {
-                Get-ChildItem -Path $path | ForEach-Object {
+                Get-ChildItem -Path $path -ErrorAction SilentlyContinue | ForEach-Object {
                     $name = $_.GetValue("ProductName")
                     if (-not $name) { $name = $_.GetValue("DisplayName") }
                     
-                    if ($name -like "*Ebantis*") {
+                    if ($name -and $name -like "*Ebantis*") {
                         $code = $_.PSChildName
                         Write-Output "Force scrubbing Product ID: $code ($name)"
                         
                         # If it's a GUID format (from Uninstall), use msiexec to clean internal DB
                         if ($code -match '^\{.*\}$') {
-                            Start-Process msiexec.exe -ArgumentList "/x $code /qn /norestart" -Wait
+                            Start-Process msiexec.exe -ArgumentList "/x $code /qn /norestart" -Wait -ErrorAction SilentlyContinue
                         }
                         
                         # Nuke the registry key directly to clear the 'already installed' block
@@ -211,16 +236,19 @@ fn cleanup_old_installations() {
         # 4. Cleanup the installation folders
         $progFiles = "${env:ProgramFiles}\EbantisV4"
         if (Test-Path $progFiles) {
+            # Try to rename first if locked, then schedule for delete
             Remove-Item -Path $progFiles -Recurse -Force -ErrorAction SilentlyContinue
         }
     "#;
 
     let mut cmd = Command::new("powershell.exe");
     cmd.args(&["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", registry_nuke]);
-    cmd.creation_flags(CREATE_NO_WINDOW);
-    let _ = cmd.status();
-    
-    log("Force cleanup routine finished.");
+    #[cfg(windows)]
+    {
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    let status = cmd.status();
+    log(&format!("Force cleanup routine finished with status: {:?}", status));
 }
 
 fn launch_msi_with_logging() {
