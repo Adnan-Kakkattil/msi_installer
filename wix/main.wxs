@@ -10,6 +10,7 @@
         <Package InstallerVersion="200"     
                  Compressed="yes" 
                  InstallScope="perMachine"
+                 Platform="x64"
                  Description="Ebantis V4 Agent Installation"
                  Comments="Installs Ebantis V4 Agent using PowerShell installer script"/>
 

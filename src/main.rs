@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
+#[cfg(windows)]
 use winapi::um::winbase::CREATE_NO_WINDOW;
 
 use winapi::um::winuser::{MessageBoxW, MB_OK, MB_ICONERROR};
