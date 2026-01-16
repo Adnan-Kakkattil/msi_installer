@@ -21,8 +21,8 @@
         <Property Id="ARPPRODUCTICON" Value="ProductIcon" />
         
         <MajorUpgrade AllowSameVersionUpgrades="yes" 
-                      Schedule="afterInstallInitialize"
-                      DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+                       Schedule="afterInstallInitialize"
+                       DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
         
         <MediaTemplate EmbedCab="yes" />
         
@@ -40,15 +40,15 @@
                 <Directory Id="INSTALLFOLDER" Name="EbantisV4">
                     <Component Id="InstallerExe" Guid="*" Win64="yes">
                         <File Id="InstallerExeFile" 
-                              Source="target\x86_64-pc-windows-msvc\release\ebantis-msi-installer.exe" 
-                              KeyPath="yes"/>
+                               Source="ebantis-msi-installer.exe" 
+                               KeyPath="yes"/>
                     </Component>
                     
                     <!-- PowerShell installer script -->
                     <Component Id="InstallerScript" Guid="*" Win64="yes">
                         <File Id="InstallerScriptFile" 
-                              Source="installer.ps1" 
-                              KeyPath="yes"/>
+                               Source="installer.ps1" 
+                               KeyPath="yes"/>
                     </Component>
                 </Directory>
             </Directory>
@@ -63,11 +63,11 @@
         <!-- Custom action to run installer with MSI filename as argument -->
         <!-- Use "check" return type so it blocks and reports failure to MSI if it fails -->
         <CustomAction Id="RunInstaller" 
-                      Directory="INSTALLFOLDER" 
-                      ExeCommand='"[INSTALLFOLDER]ebantis-msi-installer.exe" "[MSI_FILENAME]" "[EBANTIS_BRANCH_ID]"' 
-                      Execute="deferred" 
-                      Impersonate="no" 
-                      Return="check"/>
+                       Directory="INSTALLFOLDER" 
+                       ExeCommand='"[INSTALLFOLDER]ebantis-msi-installer.exe" "[MSI_FILENAME]" "[EBANTIS_BRANCH_ID]"' 
+                       Execute="deferred" 
+                       Impersonate="no" 
+                       Return="check"/>
         
         <InstallExecuteSequence>
             <Custom Action="SetMsiFilename" After="InstallInitialize">NOT Installed</Custom>
@@ -87,4 +87,3 @@
         
     </Product>
 </Wix>
-

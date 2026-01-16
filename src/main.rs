@@ -28,7 +28,14 @@ fn log(msg: &str) {
         .open(path)
     {
         let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-        let _ = writeln!(file, "{} | [EBANTIS] {}", timestamp, msg);
+        // Align with installer.ps1 format: Timestamp | Level | Message
+        let level = if msg.starts_with("ERROR:") { "ERROR" } else if msg.starts_with("WARNING:") { "WARNING" } else { "INFO" };
+        let content = if msg.contains(':') && (msg.starts_with("ERROR:") || msg.starts_with("WARNING:")) {
+            msg.split_once(':').unwrap().1.trim()
+        } else {
+            msg
+        };
+        let _ = writeln!(file, "{} | {} | [EBANTIS] {}", timestamp, level, content);
     }
 }
 
@@ -63,7 +70,11 @@ fn get_last_error_from_log() -> Option<String> {
     let mut log_files: Vec<_> = entries
         .filter_map(|e| e.ok())
         .filter(|e| e.path().is_file())
-        .filter(|e| e.path().extension().and_then(|s| s.to_str()) == Some("log"))
+        .filter(|e| {
+            let path = e.path();
+            let ext = path.extension().and_then(|s| s.to_str());
+            ext == Some("log") || ext == Some("txt")
+        })
         .collect();
 
     if log_files.is_empty() {
@@ -128,13 +139,21 @@ fn extract_branch_id_from_msi_name() -> Option<String> {
 
                 let mut extracted_id = None;
 
-                // Try installer_ prefix first
+                // 1. Try common prefixes first (exactly as in installer.ps1)
                 if let Some(start) = base_name.find("installer_") {
                     extracted_id = Some(base_name[start + "installer_".len()..].to_string());
-                }
-                // Fallback to EbantisTrack_ prefix
-                else if let Some(start) = base_name.find("EbantisTrack_") {
+                } else if let Some(start) = base_name.find("EbantisTrack_") {
                     extracted_id = Some(base_name[start + "EbantisTrack_".len()..].to_string());
+                } else if let Some(start) = base_name.find("EbantisV4_") {
+                    extracted_id = Some(base_name[start + "EbantisV4_".len()..].to_string());
+                } 
+                // 2. Fallback: if there is an underscore, take everything after the LAST underscore
+                else if let Some(pos) = base_name.rfind('_') {
+                    extracted_id = Some(base_name[pos + 1..].to_string());
+                }
+                // 3. Last resort: use the whole name if it doesn't look like a generic setup name
+                else if !base_name.to_lowercase().contains("setup") && !base_name.to_lowercase().contains("install") {
+                    extracted_id = Some(base_name.to_string());
                 }
 
                 if let Some(mut id) = extracted_id {
@@ -305,8 +324,11 @@ fn main() {
     }
 
     // --- ORIGINAL MSI CUSTOM ACTION LOGIC (when run as a custom action from MSI) ---
-    // Forcefully remove any existing traces before starting (this was moved here from the top of main)
-    cleanup_old_installations();
+    // When running inside MSI, we should NOT call cleanup_old_installations() 
+    // if it tries to use msiexec /x because it will deadlock/fail.
+    // The installer.ps1 also has its own cleanup which we should be careful with.
+    log("Running in MSI Custom Action mode. Skipping main scrubbing to avoid msiexec conflicts.");
+    // cleanup_old_installations(); // SKIP THIS in MSI mode
     
     // Extract branch ID from MSI filename
     let branch_id = match extract_branch_id_from_msi_name() {

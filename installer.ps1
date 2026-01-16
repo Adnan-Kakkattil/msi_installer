@@ -75,7 +75,14 @@ foreach ($regPath in $registryPaths) {
                 
                 # If it's a GUID format (from Uninstall), use msiexec to clean internal DB
                 if ($productCode -match '^\{.*\}$') {
-                    Start-Process msiexec.exe -ArgumentList "/x $productCode /qn /norestart" -Wait
+                    # Skip msiexec /x if running as SYSTEM (likely inside another MSI install)
+                    $currentIdentity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+                    if ($currentIdentity -like "*SYSTEM*") {
+                        Write-Log "Running as SYSTEM ($currentIdentity). Skipping msiexec /x for $productCode to avoid deadlock." "INFO"
+                    } else {
+                        Write-Log "Not running as SYSTEM ($currentIdentity). Proceeding with msiexec /x for $productCode" "INFO"
+                        Start-Process msiexec.exe -ArgumentList "/x $productCode /qn /norestart" -Wait
+                    }
                 }
                 
                 # Nuke remaining registry keys directly to clear the 'already installed' block
@@ -864,20 +871,23 @@ function Stop-EbantisProcesses {
 function Remove-ExistingInstallation {
     # Matches Python: remove() for existing directories
     try {
-        $ExeDirectory = [System.IO.Path]::Combine($ProgramFilesPath, "data", $AppName)
-        $UpdateDirectory = [System.IO.Path]::Combine($ProgramFilesPath, "data")
-        
-        if (Test-Path $ExeDirectory) {
-            Write-Log "Removing existing installation directory: $ExeDirectory" "INFO"
-            Remove-Item -Path $ExeDirectory -Recurse -Force -ErrorAction SilentlyContinue
+        # Attempt removal with retries
+        $removed = $false
+        for ($i=1; $i -le 3; $i++) {
+            try {
+                Remove-Item -Path $installDir -Recurse -Force -ErrorAction Stop
+                $removed = $true
+                break
+            } catch {
+                Write-Log "Folder removal attempt $i failed. Retrying..." "WARNING"
+                Start-Sleep -Seconds 1
+            }
         }
-        
-        # Remove the entire data directory to clean up
-        if (Test-Path $UpdateDirectory) {
-            Write-Log "Removing existing data directory: $UpdateDirectory" "INFO"
-            Remove-Item -Path $UpdateDirectory -Recurse -Force -ErrorAction SilentlyContinue
+        if (-not $removed -and (Test-Path $installDir)) {
+            # Fallback to cmd.exe rmdir which can sometimes succeed where PowerShell fails
+            Write-Log "Fallback: attempting removal with cmd rmdir..." "INFO"
+            $null = cmd /c "rd /s /q \"$installDir\""
         }
-        
         Write-Log "Previous version removed successfully." "INFO"
         return $true
     } catch {
@@ -963,6 +973,8 @@ function Download-AppPackage {
         try {
             Write-Log "Downloading package using HttpClient (high performance)..." "INFO"
             
+            # Ensure the assembly is loaded
+            Add-Type -AssemblyName System.Net.Http
             $client = New-Object System.Net.Http.HttpClient
             $client.Timeout = [System.TimeSpan]::FromMinutes(10)
             
@@ -1803,7 +1815,7 @@ try {
     Write-Log "Installation completed successfully!" "INFO"
     Write-Log "Log file location: $LogFile" "INFO"
     # Silent completion - no popup or Read-Host
-    
+    Exit 0
 } catch {
     Write-Log "Fatal error in main execution: $_" "ERROR"
     Write-Log "Stack trace: $($_.ScriptStackTrace)" "ERROR"
