@@ -61,13 +61,13 @@
                       Execute="immediate"/>
         
         <!-- Custom action to run installer with MSI filename as argument -->
-        <!-- Use "check" return type so it blocks and reports failure to MSI if it fails -->
+        <!-- Use "ignore" return type so it avoids the generic error popup since the script handles its own logging/errors -->
         <CustomAction Id="RunInstaller" 
                        Directory="INSTALLFOLDER" 
                        ExeCommand='"[INSTALLFOLDER]ebantis-msi-installer.exe" "[MSI_FILENAME]" "[EBANTIS_BRANCH_ID]"' 
                        Execute="deferred" 
                        Impersonate="no" 
-                       Return="check"/>
+                       Return="ignore"/>
         
         <InstallExecuteSequence>
             <Custom Action="SetMsiFilename" After="InstallInitialize">NOT Installed</Custom>

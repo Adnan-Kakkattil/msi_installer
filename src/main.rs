@@ -10,9 +10,81 @@ use wait_timeout::ChildExt;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 #[cfg(windows)]
+use winapi::um::shellapi::ShellExecuteW;
+#[cfg(windows)]
+use winapi::um::winuser::SW_SHOW;
+#[cfg(windows)]
+use winapi::um::processthreadsapi::{GetCurrentProcess, OpenProcessToken};
+#[cfg(windows)]
+use winapi::um::securitybaseapi::GetTokenInformation;
+#[cfg(windows)]
+use winapi::um::winnt::{TOKEN_QUERY, TokenElevation, TOKEN_ELEVATION, HANDLE};
+#[cfg(windows)]
+use winapi::um::handleapi::CloseHandle;
+#[cfg(windows)]
+use winapi::shared::minwindef::LPVOID;
+#[cfg(windows)]
 use winapi::um::winbase::CREATE_NO_WINDOW;
 
 use winapi::um::winuser::{MessageBoxW, MB_OK, MB_ICONERROR};
+
+// Elevation Helpers
+#[cfg(windows)]
+fn is_elevated() -> bool {
+    unsafe {
+        let mut handle: HANDLE = std::ptr::null_mut();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut handle) == 0 {
+            return false;
+        }
+
+        let mut elevation: TOKEN_ELEVATION = std::mem::zeroed();
+        let mut size = std::mem::size_of::<TOKEN_ELEVATION>() as u32;
+        let success = GetTokenInformation(
+            handle,
+            TokenElevation,
+            &mut elevation as *mut _ as LPVOID,
+            size,
+            &mut size,
+        );
+        
+        CloseHandle(handle);
+        
+        success != 0 && elevation.TokenIsElevated != 0
+    }
+}
+
+#[cfg(not(windows))]
+fn is_elevated() -> bool { false }
+
+#[cfg(windows)]
+fn run_elevated() -> bool {
+    let exe_path = env::current_exe().unwrap_or_else(|_| PathBuf::from("ebantis-msi-installer.exe"));
+    let exe_wstr: Vec<u16> = exe_path.to_string_lossy().encode_utf16().chain(std::iter::once(0)).collect();
+    let verb: Vec<u16> = "runas\0".encode_utf16().collect();
+    let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let cwd_wstr: Vec<u16> = cwd.to_string_lossy().encode_utf16().chain(std::iter::once(0)).collect();
+
+    // Pass original arguments forwarded
+    let args: Vec<String> = env::args().skip(1).collect();
+    let args_str = args.join(" ");
+    let args_wstr: Vec<u16> = args_str.encode_utf16().chain(std::iter::once(0)).collect();
+
+    unsafe {
+        let result = ShellExecuteW(
+            std::ptr::null_mut(),
+            verb.as_ptr(),
+            exe_wstr.as_ptr(),
+            if args.is_empty() { std::ptr::null() } else { args_wstr.as_ptr() },
+            cwd_wstr.as_ptr(),
+            SW_SHOW,
+        );
+        // If result > 32, it succeeded
+        result as usize > 32
+    }
+}
+
+#[cfg(not(windows))]
+fn run_elevated() -> bool { false }
 
 fn log(msg: &str) {
     let program_data = std::env::var("ProgramData").unwrap_or_else(|_| "C:\\ProgramData".to_string());
@@ -212,16 +284,83 @@ fn get_installer_script_path() -> PathBuf {
 fn cleanup_old_installations() {
     log("Checking for existing product registrations to scrub...");
     
+    let current_pid = std::process::id();
+    log(&format!("Current Bootstrapper PID: {}", current_pid));
+
     // Multi-stage scrubbing logic
-    let registry_nuke = r#"
-        # 1. Kill any running Ebantis processes first
-        $procs = Get-Process | Where-Object { $_.Name -like '*Ebantis*' -or $_.Name -like '*AutoUpdation*' }
-        if ($procs) {
-            Write-Host "Stopping $($procs.Count) processes..."
-            $procs | Stop-Process -Force -ErrorAction SilentlyContinue
+    // We use format! to inject the current PID so we don't kill ourselves
+    // We also define a mini-logger here to ensure these pre-install actions are recorded in the main log file
+    let script_template = r#"
+        $LogFile = "C:\ProgramData\EbantisV4\Logs\Ebantis_Setup_Log.txt"
+        $LogDir = [System.IO.Path]::GetDirectoryName($LogFile)
+        if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir -Force | Out-Null }
+        
+        function Write-CleanupLog {
+            param([string]$Message)
+            $Entry = "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') | INFO | [CLEANUP] $Message"
+            Add-Content -Path $LogFile -Value $Entry -Encoding UTF8 -ErrorAction SilentlyContinue
+            Write-Host $Message
         }
 
-        # 2. Try standard uninstallation by name
+        $MyPid = {CURRENT_PID}
+        Write-CleanupLog "Starting Pre-Install Cleanup. Current Bootstrapper PID: $MyPid"
+        
+        # Check Admin Status
+        $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+        Write-CleanupLog "Running as Admin: $isAdmin"
+
+        # ----------------------------------------------------------------
+        # 0. Kill stuck Installer/Setup tasks
+        # ----------------------------------------------------------------
+        
+        # Check for msiexec
+        $msiProcs = Get-Process -Name "msiexec" -ErrorAction SilentlyContinue
+        if ($msiProcs) {
+            $pids = $msiProcs.Id -join ', '
+            Write-CleanupLog "Found $($msiProcs.Count) running msiexec processes. PIDs: $pids"
+            Write-CleanupLog "Attempting to force kill msiexec.exe via taskkill..."
+            
+            taskkill /F /IM msiexec.exe /T 2>&1 | Out-Null
+            
+            Start-Sleep -Milliseconds 500
+            $leftover = Get-Process -Name "msiexec" -ErrorAction SilentlyContinue
+            if ($leftover) {
+                Write-CleanupLog "taskkill finished, but $($leftover.Count) msiexec processes remain. Trying Stop-Process..."
+                $leftover | Stop-Process -Force -ErrorAction SilentlyContinue
+            } else {
+                Write-CleanupLog "All msiexec processes terminated."
+            }
+        } else {
+            Write-CleanupLog "No running msiexec processes found."
+        }
+
+        # Check for other ebantis-msi-installer instances
+        $setupProcs = Get-Process -Name "ebantis-msi-installer" -ErrorAction SilentlyContinue | Where-Object { $_.Id -ne $MyPid }
+        if ($setupProcs) {
+            $pids = $setupProcs.Id -join ', '
+            Write-CleanupLog "Found $($setupProcs.Count) other installer instances. PIDs: $pids"
+            
+            taskkill /F /IM ebantis-msi-installer.exe /T 2>&1 | Out-Null
+            
+            Start-Sleep -Milliseconds 500
+            $setupProcs | Stop-Process -Force -ErrorAction SilentlyContinue
+        } else {
+            Write-CleanupLog "No other installer instances found."
+        }
+
+        # ----------------------------------------------------------------
+        # 1. Kill any running Ebantis Application processes
+        # ----------------------------------------------------------------
+        $appProcs = Get-Process | Where-Object { $_.Name -like '*Ebantis*' -or $_.Name -like '*AutoUpdation*' } | Where-Object { $_.Id -ne $MyPid }
+        if ($appProcs) {
+            Write-CleanupLog "Stopping $($appProcs.Count) application processes..."
+            $appProcs | Stop-Process -Force -ErrorAction SilentlyContinue
+        }
+
+        # ----------------------------------------------------------------
+        # 2. Registries and Folders
+        # ----------------------------------------------------------------
+        Write-CleanupLog "Checking for legacy packages to uninstall..."
         Get-Package -Name '*Ebantis*' -ErrorAction SilentlyContinue | Uninstall-Package -Force -ErrorAction SilentlyContinue
 
         # 3. Search Registry for ANY ProductCode related to Ebantis
@@ -239,11 +378,14 @@ fn cleanup_old_installations() {
                     
                     if ($name -and $name -like "*Ebantis*") {
                         $code = $_.PSChildName
-                        Write-Output "Force scrubbing Product ID: $code ($name)"
+                        Write-CleanupLog "Force scrubbing Product ID: $code ($name)"
                         
                         # If it's a GUID format (from Uninstall), use msiexec to clean internal DB
                         if ($code -match '^\{.*\}$') {
-                            Start-Process msiexec.exe -ArgumentList "/x $code /qn /norestart" -Wait -ErrorAction SilentlyContinue
+                            # If we are here, we should have killed msiexec already, so this might work, 
+                            # but safer to just nuke registry to avoid re-triggering the mutex we just freed.
+                            # Start-Process msiexec.exe -ArgumentList "/x $code /qn /norestart" -Wait -ErrorAction SilentlyContinue
+                            Write-CleanupLog "Skipping msiexec /x for cleanup to prevent mutex race. Nuking registry key instead."
                         }
                         
                         # Nuke the registry key directly to clear the 'already installed' block
@@ -256,13 +398,15 @@ fn cleanup_old_installations() {
         # 4. Cleanup the installation folders
         $progFiles = "${env:ProgramFiles}\EbantisV4"
         if (Test-Path $progFiles) {
-            # Try to rename first if locked, then schedule for delete
+            Write-CleanupLog "Removing installation folder: $progFiles"
             Remove-Item -Path $progFiles -Recurse -Force -ErrorAction SilentlyContinue
         }
     "#;
 
+    let registry_nuke = script_template.replace("{CURRENT_PID}", &current_pid.to_string());
+
     let mut cmd = Command::new("powershell.exe");
-    cmd.args(&["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", registry_nuke]);
+    cmd.args(&["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", &registry_nuke]);
     #[cfg(windows)]
     {
         cmd.creation_flags(CREATE_NO_WINDOW);
@@ -270,12 +414,12 @@ fn cleanup_old_installations() {
     
     match cmd.spawn() {
         Ok(mut child) => {
-            // Wait up to 30 seconds for cleanup to finish
-            let timeout = std::time::Duration::from_secs(30);
+            // Wait up to 60 seconds for cleanup to finish (increased time since we are killing things)
+            let timeout = std::time::Duration::from_secs(60);
             match child.wait_timeout(timeout) {
                 Ok(Some(status)) => log(&format!("Force cleanup routine finished with status: {:?}", status)),
                 Ok(None) => {
-                    log("Cleanup routine timed out after 30s. Killing process and continuing...");
+                    log("Cleanup routine timed out after 60s. Killing process and continuing...");
                     let _ = child.kill();
                 }
                 Err(e) => log(&format!("Error waiting for cleanup: {}", e)),
@@ -315,11 +459,27 @@ fn main() {
     // This is a heuristic; a more robust check might involve looking for specific WiX custom action properties.
     // For now, if the first argument is not an MSI command, assume standalone.
     if args.len() <= 1 || (args.len() > 1 && !args[1].starts_with('/') && !args[1].ends_with(".msi")) {
+        
+        // --- ELEVATION CHECK (Only for Bootstrapper) ---
+        if !is_elevated() {
+            log("Process is NOT running as Administrator. Attempting to restart with elevation...");
+            
+            if run_elevated() {
+                 log("Restarted with RunAs. Exiting current process.");
+                 std::process::exit(0);
+            } else {
+                 log("Failed to elevate process. User returned 'No' or UAC error.");
+                 show_error("This installer requires Administrator privileges to clean up previous versions.\n\nPlease permit the UAC prompt or run as Administrator.");
+                 std::process::exit(1);
+            }
+        }
+        log("Running with Administrator privileges.");
+        // -----------------------------------------------
+        
         log("Detected Standalone execution. Acting as Setup Bootstrapper...");
         cleanup_old_installations();
         launch_msi_with_logging();
         // The MSI process will run independently, so we can exit.
-        // If we wanted to wait for it, we'd use cmd.status() instead of cmd.spawn().
         std::process::exit(0); 
     }
 

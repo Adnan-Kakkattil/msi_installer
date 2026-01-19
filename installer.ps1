@@ -138,6 +138,40 @@ foreach ($Dir in $DirsToCreate) {
     }
 }
 
+# Set Folder Permissions
+$FolderPermissions = @(
+    $ProgramDataPath,
+    $LogFolder,
+    $LogFile
+)
+
+foreach ($PathItem in $FolderPermissions) {
+    try {
+        if (Test-Path $PathItem) {
+            $item = Get-Item $PathItem
+            $isDir = $item -is [System.IO.DirectoryInfo]
+            $acl = Get-Acl $PathItem
+            
+            # Different inheritance for folders vs files
+            $inheritance = if ($isDir) { "ContainerInherit,ObjectInherit" } else { "None" }
+            $propagation = "None"
+            
+            $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+                [System.Security.Principal.SecurityIdentifier]::new([System.Security.Principal.WellKnownSidType]::BuiltinUsersSid, $null),
+                "Modify",
+                $inheritance,
+                $propagation,
+                "Allow"
+            )
+            $acl.AddAccessRule($rule)
+            Set-Acl -Path $PathItem -AclObject $acl
+            Write-Log "Granted Modify permissions for Users on $PathItem" "INFO"
+        }
+    } catch {
+        Write-Log "Failed to set permissions on $PathItem : $_" "WARNING"
+    }
+}
+
 # Write-Log function moved to the top
 
 Write-Log "Starting Ebantis V4 Installer..." "INFO"
